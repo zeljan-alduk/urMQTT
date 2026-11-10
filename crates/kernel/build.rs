@@ -19,6 +19,11 @@ fn main() {
         println!("cargo::rustc-link-arg-bins=-T{dir}/{script}");
         println!("cargo::rustc-link-arg-bins=--no-dynamic-linker");
         println!("cargo::rustc-link-arg-bins=-zmax-page-size=4096");
+        // The same for the kernel binary of another crate (an edition's
+        // image, ADR-335): its build script reads DEP_URMQTT_KERNEL_* and
+        // passes them on (examples/edition/build.rs).
+        println!("cargo::metadata=linker_script={dir}/{script}");
+        println!("cargo::metadata=link_args=--no-dynamic-linker -zmax-page-size=4096");
         build_worker();
     }
 }

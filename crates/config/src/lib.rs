@@ -12,7 +12,9 @@
 #![deny(unsafe_code)]
 
 mod store;
-pub use store::{CONFIG, ConfigHandle, LoadError, LoadInfo, info, load, load_defaults};
+pub use store::{
+    CONFIG, ConfigHandle, LoadError, LoadInfo, blob_in, info, load, load_defaults, load_ext,
+};
 /// The newest configuration format this build reads (the kernel's build note, ADR-296).
 pub use urmqtt_cfg::FORMAT_VERSION;
 pub use urmqtt_cfg::blob::Hex;

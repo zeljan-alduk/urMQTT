@@ -7,16 +7,29 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
+# The build script hands its linker script to the kernel binaries of other
+# crates (an edition's image, ADR-335): DEP_URMQTT_KERNEL_LINKER_SCRIPT.
+links = "urmqtt-kernel"
 
+# The kernel as a library (NOW-18, ADR-335): an image is a binary crate that
+# names its edition with `urmqtt_kernel::image!`.
+[lib]
+name = "urmqtt_kernel"
+path = "src/lib.rs"
+# Host tests cover the parts that compile on the host (cmdline.rs, ext.rs).
+test = true
+bench = false
+
+# The open edition's image.
 [[bin]]
 name = "urmqtt"
 path = "src/main.rs"
-# Host tests cover the parts that compile on the host (cmdline.rs).
-test = true
+test = false
 bench = false
 
 [dependencies]
 urmqtt-broker = { path = "../broker" }
+urmqtt-cfg.workspace = true
 urmqtt-config.workspace = true
 urmqtt-dispatch = { path = "../dispatch" }
 urmqtt-mqtt = { path = "../mqtt" }

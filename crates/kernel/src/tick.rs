@@ -49,6 +49,8 @@ fn on_tick(_intid: u32) {
     // The optional virtio drivers (ADR-258): balloon statistics, the vsock
     // service. The same rules: bounded, device locks only tried.
     crate::vdev::tick();
+    // An edition's tick hook (ADR-338); nothing in the open edition.
+    crate::ext::tick();
     // DMA remapping (ADR-305): core 0 reads the IOMMU fault logs every 100 ms,
     // a bounded number per unit, only trying the lock.
     // This core's own count: the global one interleaves every core's ticks,

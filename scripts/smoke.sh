@@ -3960,6 +3960,96 @@ gicv2() {
 # (the control: the test can see a write). A full MQTT round trip over mutual TLS runs with translation on.
 # `require` refuses a machine without an IOMMU and a virtio device that bypasses it (no
 # VIRTIO_F_ACCESS_PLATFORM); `auto` goes on without one.
+# NOW-18 (ADR-335 to ADR-339): the kernel as a library. The example edition (examples/edition) is a second
+# kernel image built through the library's API, with a PCI driver for QEMU's edu device (1234:11e8), keys in
+# the reserved configuration range and every boot hook. It binds one edu device by its ID, reads a key of the
+# reserved range, leaves the second device spare and runs the hooks; the open image with the same devices
+# behaves as before (no edition line, no driver), and refuses a configuration with an extension key.
+edition() {
+    local dir="$OUT/edition" accel arch_dir=aarch64-unknown-none
+    [[ $ARCH == x86_64 ]] && arch_dir=x86_64-urmqtt-none
+    local ext_kernel="$ROOT/target/$arch_dir/release/urmqtt-example" packer="$ROOT/target/debug/urmqtt-example-config"
+    mkdir -p "$dir"
+    if ! (cd "$ROOT" && make -s edition-example ARCH="$ARCH" >"$dir/build.log" 2>&1); then
+        echo "  ✗ edition: make edition-example failed (see $dir/build.log)"
+        FAILED=$((FAILED + 1))
+        return
+    fi
+    cp "$ROOT/deploy/dev/config.toml" "$dir/ext.toml"
+    printf '\n[ext.example]\nedu_check = 0x12345678\n' >>"$dir/ext.toml"
+    cp "$ROOT/deploy/dev/config.toml" "$dir/off.toml"
+    printf '\n[ext.example]\nedu = "off"\n' >>"$dir/off.toml"
+    "$packer" "$dir/ext.toml" --env dev --root "$ROOT/deploy/dev" --out-slot "$dir/ext.cfg" >/dev/null
+    "$packer" "$dir/off.toml" --env dev --root "$ROOT/deploy/dev" --out-slot "$dir/off.cfg" >/dev/null
+    # The open packer refuses the `[ext]` table.
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool)
+    if "$ROOT/target/debug/urmqtt-config" pack "$dir/ext.toml" --env dev --root "$ROOT/deploy/dev" --out "$dir/open.blob" \
+        >"$dir/open-pack.log" 2>&1; then
+        echo "  ✗ edition: the open urmqtt-config packed an [ext] table"
+        FAILED=$((FAILED + 1))
+    else
+        echo "  ✓ edition: the open urmqtt-config refuses an [ext] table"
+        PASSED=$((PASSED + 1))
+    fi
+    local open_kernel=$KERNEL
+    rm -f "$OUT"/edition-*.raw
+    KERNEL=$ext_kernel
+    MKIMG_EXTRA=(--config-slot "$dir/ext.cfg")
+    mkimg "$OUT/edition-ext.raw" "smoke"
+    MKIMG_EXTRA=(--config-slot "$dir/off.cfg")
+    mkimg "$OUT/edition-off.raw" "smoke"
+    MKIMG_EXTRA=()
+    mkimg "$OUT/edition-plain.raw" "smoke"
+    KERNEL=$open_kernel
+    MKIMG_EXTRA=(--config-slot "$dir/ext.cfg")
+    mkimg "$OUT/edition-open-ext.raw" "smoke"
+    MKIMG_EXTRA=()
+    mkimg "$OUT/edition-open.raw" "smoke"
+    local edu=(-device edu -device edu)
+    for accel in $ACCELS; do
+        local log data status
+        log="$OUT/edition-ext-$accel.log" data="$OUT/edition-ext-$accel.img" status=0
+        fresh_disk "$OUT/edition-ext.raw" "$data"
+        boot "$log" --disk "$data" --accel "$accel" --headless --fwd none -- "${edu[@]}" || status=$?
+        check "edition: the example image binds edu by its PCI ID, reads a reserved key, runs its hooks [$accel]" \
+            "$log" "$status" \
+            "edition: example: 1 PCI driver\(s\), 2 configuration key\(s\), hooks: early devices ready tick" \
+            "example: early hook: ext.example.edu_check = 0x12345678, ext.example.edu = \"auto\"" \
+            "pci [0-9a-f:.]+ 1234:11e8 class 00\.ff" \
+            "ext: example-edu at [0-9a-f:.]+: driven: edu 1\.0, liveness check 0x12345678 -> 0xedcba987" \
+            "ext: example-edu at [0-9a-f:.]+: spare \(it drives 1\)" \
+            "example: devices hook: 1 edu device\(s\) driven" \
+            "example: ready hook: [1-9][0-9]* tick\(s\) seen" \
+            "virtio: virtio-net at [0-9a-f:.]+: driven: the network" \
+            "^URMQTT READY$" "NOT:virtio: .*: failed" "$NO_FAULT"
+        log="$OUT/edition-off-$accel.log" data="$OUT/edition-off-$accel.img" status=0
+        fresh_disk "$OUT/edition-off.raw" "$data"
+        boot "$log" --disk "$data" --accel "$accel" --headless --fwd none -- -device edu || status=$?
+        check "edition: a driver that refuses is reported, the boot goes on [$accel]" "$log" "$status" \
+            "example: early hook: ext.example.edu_check = 0x5a5a5a5a, ext.example.edu = \"off\"" \
+            "WARN  ext: example-edu at [0-9a-f:.]+: failed: ext.example.edu = \"off\"" \
+            "example: devices hook: 0 edu device\(s\) driven" "^URMQTT READY$" "$NO_FAULT"
+        log="$OUT/edition-plain-$accel.log" data="$OUT/edition-plain-$accel.img" status=0
+        fresh_disk "$OUT/edition-plain.raw" "$data"
+        boot "$log" --disk "$data" --accel "$accel" --headless --fwd none || status=$?
+        check "edition: no edu device, no configuration of the edition: the defaults [$accel]" "$log" "$status" \
+            "example: early hook: ext.example.edu_check = 0x5a5a5a5a, ext.example.edu = \"auto\"" \
+            "example: devices hook: 0 edu device\(s\) driven" "NOT:ext: example-edu" "^URMQTT READY$" "$NO_FAULT"
+        # The open image: the same devices are listed and left alone, nothing of an edition is logged.
+        log="$OUT/edition-open-$accel.log" data="$OUT/edition-open-$accel.img" status=0
+        fresh_disk "$OUT/edition-open.raw" "$data"
+        boot "$log" --disk "$data" --accel "$accel" --headless --fwd none -- "${edu[@]}" || status=$?
+        check "edition: the open image lists the edu devices and drives none, as before [$accel]" "$log" "$status" \
+            "pci [0-9a-f:.]+ 1234:11e8 class 00\.ff" "NOT:edition:" "NOT:ext: " "NOT:example" \
+            "^URMQTT READY$" "$NO_FAULT"
+        log="$OUT/edition-open-ext-$accel.log" data="$OUT/edition-open-ext-$accel.img" status=0
+        fresh_disk "$OUT/edition-open-ext.raw" "$data"
+        boot_until "$log" "resetting in 60 s" --disk "$data" --accel "$accel" --fwd none || status=$?
+        check "edition: the open image refuses a configuration with an extension key [$accel]" "$log" "$status" \
+            "fatal: configuration refused: blob: unknown field tag" "NOT:URMQTT READY"
+    done
+}
+
 iommu_cfg() {
     local mode=$1 out=$2
     awk -v m="$mode" '{ print } /^\[devices\]/ { print "iommu = \"" m "\"" }' "$ROOT/deploy/dev/config.toml" >"$out"
@@ -5766,6 +5856,15 @@ if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     want virtio_gpu && virtio_gpu
     want virtio_devices && virtio_devices
     want iommu_suite && iommu_suite
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=edition: the kernel as a library (NOW-18, ADR-335 to ADR-339): the example edition's image with QEMU's
+# edu devices, and the open image beside it.
+if [[ ${SMOKE_ONLY:-} == edition && $ARCH != universal ]]; then
+    edition
     echo "smoke: $PASSED passed, $FAILED failed"
     [[ $FAILED -eq 0 ]]
     exit

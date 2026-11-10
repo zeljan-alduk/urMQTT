@@ -781,12 +781,35 @@ pub fn pack(toml_text: &str, opts: PackOptions<'_>) -> Result<Vec<u8>, Vec<Confi
 /// empty configuration of a template ISO, whose slot then tells what its kernel can read (ADR-233).
 pub fn pack_with(
     toml_text: &str,
+    opts: PackOptions<'_>,
+    newest_format: bool,
+) -> Result<Vec<u8>, Vec<ConfigError>> {
+    pack_ext(toml_text, opts, newest_format, &[])
+}
+
+/// [`pack_with`] for an edition built on this repository (NOW-18, ADR-337): the keys of its extension fields
+/// `ext` are read from the TOML table `[ext]` (`ext.<section>.<name>`, [`urmqtt_cfg::ext`]) and written in the
+/// reserved tag range. With an empty `ext` this is `pack_with`: an `[ext]` table is then an unknown key, as it is
+/// for the open `urmqtt-config` and the builder page.
+pub fn pack_ext(
+    toml_text: &str,
     mut opts: PackOptions<'_>,
     newest_format: bool,
+    ext: &[fields::Field],
 ) -> Result<Vec<u8>, Vec<ConfigError>> {
     let mut user: toml::Table = toml_text
         .parse()
         .map_err(|e: toml::de::Error| vec![cerr("", e.to_string())])?;
+    let ext_table = if ext.is_empty() {
+        None
+    } else {
+        urmqtt_cfg::ext::check(ext).map_err(|m| vec![cerr("ext", m)])?;
+        match user.remove("ext") {
+            None => Some(toml::Table::new()),
+            Some(toml::Value::Table(t)) => Some(t),
+            Some(_) => return Err(vec![cerr("ext", "must be a table")]),
+        }
+    };
     let toml_env = match user.remove("env") {
         None => None,
         Some(toml::Value::String(s)) => Some(s),
@@ -811,7 +834,10 @@ pub fn pack_with(
     let (text, supplied) = complete(&user)?;
     let cfg = parse(&env, &text)?;
     let files = read_files(&cfg, &supplied, &mut opts)?;
-    let builder = build(&cfg, &files).map_err(blob_err)?;
+    let mut builder = build(&cfg, &files).map_err(blob_err)?;
+    if let Some(t) = ext_table {
+        build_ext(&mut builder, &t, ext)?;
+    }
     // Packed for a dev kernel when the environment is dev; otherwise the
     // strictest check (a release kernel).
     if newest_format {
@@ -820,6 +846,87 @@ pub fn pack_with(
             .map_err(blob_err)
     } else {
         builder.finish(cfg.env == "dev").map_err(blob_err)
+    }
+}
+
+/// Every leaf of the `[ext]` table as (`ext.<path>`, value).
+fn ext_leaves<'t>(prefix: &str, t: &'t toml::Table, out: &mut Vec<(String, &'t toml::Value)>) {
+    for (k, v) in t {
+        let key = format!("{prefix}.{k}");
+        match v {
+            toml::Value::Table(sub) => ext_leaves(&key, sub, out),
+            _ => out.push((key, v)),
+        }
+    }
+}
+
+/// Encodes the `[ext]` table into `b` (ADR-337): every key must be a field of `ext`, every value of its kind.
+fn build_ext(
+    b: &mut Builder,
+    t: &toml::Table,
+    ext: &[fields::Field],
+) -> Result<(), Vec<ConfigError>> {
+    b.add_extensions(ext).map_err(blob_err)?;
+    let mut leaves = Vec::new();
+    ext_leaves("ext", t, &mut leaves);
+    let mut errors = Vec::new();
+    for (key, v) in leaves {
+        let Some(f) = urmqtt_cfg::ext::lookup_key(&key, ext) else {
+            errors.push(cerr(
+                &key,
+                "unknown key (not an extension field of this edition)",
+            ));
+            continue;
+        };
+        let wrong = |what: &str| cerr(&key, format!("must be {what}"));
+        let r = match (f.kind, v) {
+            (Kind::Bool(_), toml::Value::Boolean(x)) => {
+                b.bool(f.tag, *x).map_err(|e| cerr(&key, e.msg))
+            }
+            (Kind::UInt { .. }, toml::Value::Integer(x)) => match u64::try_from(*x) {
+                Ok(x) => b.uint(f.tag, x).map_err(|e| cerr(&key, e.msg)),
+                Err(_) => Err(cerr(&key, "out of range")),
+            },
+            (Kind::Enum { variants, .. }, toml::Value::String(x)) => {
+                match variants
+                    .iter()
+                    .position(|v| v == x)
+                    .and_then(|i| u8::try_from(i).ok())
+                {
+                    Some(i) => b.variant(f.tag, i).map_err(|e| cerr(&key, e.msg)),
+                    None => Err(cerr(
+                        &key,
+                        format!("must be one of {}", variants.join(", ")),
+                    )),
+                }
+            }
+            (Kind::Str { .. }, toml::Value::String(x)) => {
+                b.str(f.tag, x).map_err(|e| cerr(&key, e.msg))
+            }
+            (Kind::Strs { .. }, toml::Value::Array(a)) => {
+                let items: Option<Vec<&str>> = a.iter().map(toml::Value::as_str).collect();
+                match items {
+                    Some(items) => b.strs(f.tag, &items).map_err(|e| cerr(&key, e.msg)),
+                    None => Err(wrong("a list of strings")),
+                }
+            }
+            (Kind::Bool(_), _) => Err(wrong("true or false")),
+            (Kind::UInt { .. }, _) => Err(wrong("an integer")),
+            (Kind::Enum { .. } | Kind::Str { .. }, _) => Err(wrong("a string")),
+            (Kind::Strs { .. }, _) => Err(wrong("a list of strings")),
+            _ => Err(cerr(
+                &key,
+                "this kind of field is not allowed for an extension",
+            )),
+        };
+        if let Err(e) = r {
+            errors.push(e);
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
     }
 }
 

@@ -1661,6 +1661,7 @@ dependencies = [
  "sha2 0.11.1",
  "urmqtt-arch",
  "urmqtt-broker",
+ "urmqtt-cfg",
  "urmqtt-config",
  "urmqtt-control",
  "urmqtt-diag",

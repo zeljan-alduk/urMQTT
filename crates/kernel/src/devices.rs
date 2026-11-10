@@ -1316,6 +1316,9 @@ fn probe_pci(
             },
         });
         let (Some(ty), Some(kind)) = (ty, kind) else {
+            // Not a virtio function this kernel knows: an edition's driver
+            // may bind it (ADR-336); the open edition has none.
+            crate::ext::probe_pci(&mut ecam, f);
             continue;
         };
         // DMA memory of this device goes into its own IOMMU domain (ADR-305).

@@ -159,10 +159,12 @@ enum StoragePlan {
 
 static STAGE2: SpinLock<Option<Stage2>> = SpinLock::new(None);
 
-// SAFETY: `urmqtt_kmain` is a unique symbol; the arch `_start` stubs call it once per boot, on
-// the boot CPU, with the C ABI and no arguments (see the comment above).
-#[unsafe(no_mangle)]
-extern "C" fn urmqtt_kmain() -> ! {
+/// The boot CPU's kernel: called once per boot by the image's `urmqtt_kmain`
+/// (`urmqtt_kernel::image!`, ADR-335), which the arch `_start` stubs call
+/// with the C ABI and no arguments.
+pub fn kmain(edition: &'static crate::ext::Edition) -> ! {
+    // The image's edition first: the configuration below may hold its keys.
+    crate::ext::install(edition);
     // The console first on x86, so that every later failure can say why.
     arch::early_console();
     arch_trap::set_handler(trap::handle);
@@ -185,9 +187,13 @@ extern "C" fn urmqtt_kmain() -> ! {
     // console exists; until then the built-in defaults are in effect.
     let config_slot = config_module();
     let config_result = match config_slot {
-        Some(slot) => urmqtt_config::load(slot),
+        // With the open edition's empty table this is `urmqtt_config::load`.
+        Some(slot) => urmqtt_config::load_ext(slot, edition.config),
         None => Ok(urmqtt_config::load_defaults()),
     };
+    if config_result.is_ok() {
+        crate::ext::load_config(config_slot);
+    }
     urmqtt_log::set_max_level(urmqtt_config::CONFIG.observability.log_level);
     let dev = urmqtt_config::CONFIG.dev();
     let early = discover(&mem);
@@ -480,6 +486,8 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
         Ok(()) => fatal("crypto: CRC-32C known-answer test failed"),
         Err(name) => fatal_fmt(format_args!("crypto: {name} known-answer test failed")),
     }
+    // An edition's line and its `early` hook (ADR-338; nothing for the open edition).
+    crate::ext::early();
     // Interrupts and time (M3). Device mappings must precede the lock.
     let (timer_line, controller) = arch::init_interrupts(s.platform.as_ref(), s.cpus);
     info!("{controller}");
@@ -540,6 +548,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
             )),
             Err(e) => fatal_fmt(format_args!("device probe failed: {e:?}")),
         }
+        crate::ext::after_probe();
     }
     s.boot_entropy = [0; ENTROPY_VALUES as usize];
     // The CSPRNG exists: renew the stack canary from it. Still safe: nothing
@@ -813,6 +822,7 @@ extern "C" fn kmain_stage2(_arg: u64) -> ! {
     #[cfg(feature = "virtio-gpu")]
     crate::gpucon::report();
     crate::vdev::report();
+    crate::ext::before_ready();
     urmqtt_log::raw(format_args!("URMQTT READY\n"));
     if let Some(level) = s.options.log_level {
         info!("log: level {level:?} from the command line");

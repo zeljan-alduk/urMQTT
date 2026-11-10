@@ -3177,6 +3177,8 @@ mod devices_tests;
 #[cfg(test)]
 mod encryption_tests;
 #[cfg(test)]
+mod ext_tests;
+#[cfg(test)]
 mod ipv6_tests;
 #[cfg(test)]
 mod log_tls_tests;

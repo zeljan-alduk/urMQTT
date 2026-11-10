@@ -249,9 +249,52 @@ MADT, GTDT, MCFG, SPCR). The `platform` crate turns either source into one
 `PlatformInfo`, and M5 verifies that `-machine virt,acpi=on` and `acpi=off`
 print identical summaries.
 
+## 8b. The kernel as a library (NOW-18, ADR-335 to ADR-339)
+
+`crates/kernel` is a library (`urmqtt_kernel`) and a one-line binary. A kernel **image** is a binary crate that
+names its *edition* with `urmqtt_kernel::image!`; the open image is `crates/kernel/src/main.rs`:
+
+```rust
+#![cfg_attr(target_os = "none", no_std, no_main)]
+urmqtt_kernel::image!(urmqtt_kernel::ext::Edition::OPEN);
+```
+
+The macro checks the edition when the crate is compiled (`Edition::check`, a `const fn`) and defines the boot
+CPU's `urmqtt_kmain` (which the arch `_start` stubs call) as a call of the library's `kmain` with that edition.
+Everything the kernel does is the library's; an edition adds to it at four kinds of extension points, all in
+`urmqtt_kernel::ext`, and nothing else is reachable from outside:
+
+| Extension point | Type | When it runs | Rules |
+|---|---|---|---|
+| PCI drivers | `PciDriver { name, ids: &[PciId], max, probe }` | during the PCI scan, for every function no open driver claims | an ID is vendor:device, a vendor, or a class:subclass; a function with the virtio vendor `0x1AF4` is never offered, and an ID that names it is a build error (the open drivers bind as before, ADR-336); the first matching driver with room binds; `max` more are `spare` |
+| Device access | `PciDevice` (handed to `probe`) | in `probe` only | the function's own configuration space, `enable`, its memory BARs (`bar`, `map_bar`: a bounds-checked `Region` over at most 16 MiB, mapped before the page tables are locked), `dma_alloc` in the function's IOMMU domain (ADR-305) |
+| Configuration keys | `urmqtt_cfg::fields::Field` (`urmqtt_cfg::ext::field`) | read with `ext::config_bool/uint/variant/str/strs` | tags `0xF000..=0xFFFE`, keys `ext.<section>.<name>` (TOML `[ext.<section>]`), kinds Bool, UInt, Enum, Str, Strs; the open kernel and tools refuse such a record (ADR-337) |
+| Boot hooks | `Hooks { early, devices, ready, tick }` | `early`: heap and self-tests up, before interrupts and devices; `devices`: after the PCI scan, device memory still mappable; `ready`: just before `URMQTT READY`; `tick`: the boot CPU's 10 ms tick, interrupt context | plain `fn()`; a hook that cannot go on calls `ext::fatal` (ADR-338) |
+
+Boot log: an edition that adds anything prints `edition: <name>: <n> PCI driver(s), <m> configuration key(s),
+hooks: ...` once the heap is up; each bound function prints `ext: <driver> at <bdf>: driven: <detail>` (or
+`spare`, or a warning `failed: <why>`), and the Diagnostic report's PCI list names the driver. The open image runs
+the same code on empty tables and prints none of it.
+
+**Building an image elsewhere.** The library's build script hands its linker script and link flags to dependents
+(`links = "urmqtt-kernel"`: `DEP_URMQTT_KERNEL_LINKER_SCRIPT`, `DEP_URMQTT_KERNEL_LINK_ARGS`), and builds the
+database worker it embeds from this repository's checkout. An edition's workspace copies the three things Cargo does
+not take from a dependency: the `[patch.crates-io]` entries of the vendored crates, the `release` and `dev`
+profiles, and the kernel target's `rustflags` (`.cargo/config.toml`) with the Makefile's `-Zbuild-std`, path
+remapping, stack protector and PIE flags. `examples/edition` is such a workspace inside this repository (its own
+`[workspace]` and `Cargo.lock`): a driver for QEMU's `edu` device (1234:11e8) that maps BAR 0 and runs the device's
+liveness check with a value from `ext.example.edu_check`, every hook, and its own packer (`pack_ext` of
+`urmqtt-config-schema`). `make edition-example [ARCH=x86_64]` builds it; the smoke group `edition` boots it and the
+open image side by side; `scripts/mkiso.sh --config-slot` puts an edition's slot into an image unchecked (the
+open `urmqtt-config` cannot read it).
+
+The crates an edition's driver needs come re-exported from the library, so their versions are the kernel's:
+`urmqtt_kernel::cfg`, `urmqtt_kernel::log` (the `info!`/`warn!` macros), `urmqtt_kernel::pci`.
+
 ## 9. Crate dependency rules
 
-- `kernel` depends on everything. Nothing depends on `kernel`.
+- `kernel` depends on everything. Inside this repository nothing depends on `kernel`; an edition's image crate
+  does (§8b).
 - The host-testable crates (`timer-wheel`, `tcp`, `mqtt`, `broker`, `tls` record layer, `net` parsing, `config`, `platform` parsers) never touch registers. Hardware access sits behind traits implemented in `arch-aarch64`, `virtio` and `kernel`.
 - `broker` is tested end to end over an in-memory transport.
 - The IOMMU drivers (`iommu`) are host-testable too: registers and table memory are traits the kernel implements (ADR-305).

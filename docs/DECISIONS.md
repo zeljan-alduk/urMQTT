@@ -5385,3 +5385,179 @@ device the kernel does not drive is unaffected; one for a driven device would be
   before. Turning IPv6 on adds the listeners' IPv6 surface (every port that listens on IPv4 also listens on IPv6);
   `metrics.allow_from` and `plaintext.allow_from` without IPv6 networks keep refusing every IPv6 client. Back to
   v0.5.x or a format-22 kernel: remove the keys and the IPv6 allow-list entries.
+
+## ADR-335 — The kernel as a library: one crate, the open image is one line on top of it (NOW-18)
+
+- **Status:** Accepted (NOW-18). ADR-336 to ADR-339 are its parts. No configuration format number and no store
+  schema: nothing an operator writes or keeps changes.
+- **Context.** [EDITIONS.md](EDITIONS.md) §5: the commercial repository must build its own kernel image with
+  drivers for devices that are not virtio, depending on this repository's crates at a tag, without a fork. Until
+  now `crates/kernel` was a binary (`src/main.rs` declared every module), so another crate could not call into it,
+  and its tables (`virtio::registry::KINDS`, `vdev::DRIVERS`, the configuration tags) were closed lists.
+- **Decision.**
+  1. **A library and a one-line binary in the same package.** `src/main.rs` became `src/lib.rs` (crate name
+     `urmqtt_kernel`) by a `git mv`; the module declarations are unchanged, the modules stay private, and three
+     things are new: `pub mod ext` (the extension API, ADR-336 to ADR-338), the re-exports an edition's driver needs
+     at the kernel's versions (`urmqtt_kernel::cfg`, `::log`, `::pci`), and the hidden entry points `__kmain`
+     (target) and `__host_main` (host). `src/main.rs` is now `urmqtt_kernel::image!(urmqtt_kernel::ext::Edition::OPEN)`.
+     *Not* split into more crates (a "kernel-core" and a "kernel-bin", or the boot glue in a crate of its own): the
+     modules reach each other through `crate::` everywhere, and a split would have been thousands of lines of
+     path changes for the same result. The diff of the existing modules is the boot entry (below), three calls
+     into `ext`, and nothing else.
+  2. **`image!` owns the entry symbol.** The arch `_start` stubs call `urmqtt_kmain` (unchanged). That
+     `#[unsafe(no_mangle)] extern "C" fn` moved from `boot.rs` into the macro, which the image crate expands: it
+     calls `boot::kmain(&EDITION)` with the image's edition in a `static`. So the edition is a link-time constant
+     of the image, there is no global the library must be told about at run time, and an image without
+     `image!` does not link (no `urmqtt_kmain`). The macro also `const`-evaluates `Edition::check`: an edition
+     that breaks a rule (ADR-336, ADR-337) is a compile error of the image crate. On the host the macro defines
+     `main` (the old host stub, unchanged).
+  3. **`kmain` installs the edition first** (`ext::install`, a `OnceCell`), then loads the configuration with the
+     edition's key table (`urmqtt_config::load_ext`; with the open edition's empty table it is `load`, the same
+     function body).
+  4. **Linking an image elsewhere.** The library's build script already linked the open binary
+     (`rustc-link-arg-bins`: the linker script, `--no-dynamic-linker`, `-zmax-page-size=4096`). For dependents it
+     now also says them as `links` metadata (`links = "urmqtt-kernel"`; `DEP_URMQTT_KERNEL_LINKER_SCRIPT` and
+     `DEP_URMQTT_KERNEL_LINK_ARGS`), which an image's build script passes on (`examples/edition/build.rs`). The
+     database worker the kernel embeds is built by the same build script from the library's checkout, as before.
+     What Cargo does not take from a dependency an edition copies: the `[patch.crates-io]` entries of the vendored
+     crates, the `dev` and `release` profiles, the kernel target's `rustflags` and the Makefile's flags (written
+     down in `examples/edition/Cargo.toml`, marked COPY, and in ARCHITECTURE.md §8b).
+  5. **Nothing is published.** No crate goes to crates.io (`publish = false` stays); an edition depends on this
+     repository by a git dependency pinned to a release tag (EDITIONS.md §5).
+- **Behaviour of the open image.** The same, by construction and by test: every new path starts with an empty
+  table or an absent hook (ADR-336 to ADR-338), no log line is added, the configuration is parsed by the same
+  code (an empty extension table changes no verdict: `cfg` tests, fuzz `cfg_ext`), and the smoke group `edition`
+  boots the open image beside the example edition's with the same devices and checks that it logs nothing of an
+  edition and drives no `edu` device. Every other smoke group and host test ran unchanged (ADR-339).
+- **Reproducibility.** The image is still reproducible (built twice, byte-identical, `make repro`). It is *not*
+  byte-identical to the image before this change: the library's symbols carry the crate name `urmqtt_kernel`
+  instead of `urmqtt`, the boot entry is one call deeper, and the extension checks are code. `make repro` compares
+  two builds of one commit, which is what it promised ("identical before and after" in ROADMAP NOW-18 is read as
+  "`make repro` passes before and after", *decided*).
+
+## ADR-336 — An edition's PCI drivers: bound by ID, never to a virtio function (NOW-18)
+
+- **Status:** Accepted (NOW-18).
+- **Decision.**
+  1. **The table.** `Edition::pci_drivers: &[PciDriver]`, at most 32; a `PciDriver` is a name (`[a-z0-9-]`, at most
+     32 bytes, unique), its IDs (`PciId`: vendor:device, a whole vendor, or a class and subclass; every field
+     given must match), `max` (at least 1) and `probe: fn(&mut PciDevice) -> Result<String, String>`.
+  2. **The open drivers first, always.** The PCI scan (`devices::probe_pci`) is unchanged; a function is offered to
+     the edition only where the open kernel stops looking at it: when `registry::type_of` does not know it. On top
+     of that the library refuses three ways what would let an edition take a virtio device: an ID naming vendor
+     `0x1AF4` (or `0xFFFF`) is a compile error, `PciId::matches` is false for a `0x1AF4` function whatever the ID
+     says (a class ID such as 02:00 would otherwise match a transitional virtio-net), and `ext::probe_pci` returns
+     before any matching for such a function. Bridges are never offered. So an edition cannot change how the open
+     drivers bind (the risk ROADMAP NOW-18 names), and the const checks of `vdev/mod.rs` are untouched.
+  3. **Binding.** The first driver in table order whose IDs match binds the function if it drives fewer than `max`;
+     otherwise the function is `spare`. `probe` gets a `PciDevice` for that one function: its IDs, its
+     configuration space (reads and writes of its own 4 KiB, nothing else), `enable(bus_master)`, its memory BARs
+     as programmed by the firmware (`bar`), `map_bar(index, len)` (at most the BAR and at most 16 MiB, mapped as
+     device memory for the kernel's lifetime, returned as the bounds-checked `virtio::Region`) and `dma_alloc`
+     (zeroed, contiguous, mapped into the function's own IOMMU domain when an IOMMU is in use, ADR-305). Probing
+     happens during the scan, before the page tables are locked, which is why mapping is allowed only there.
+  4. **What is reported.** `ext: <driver> at <bdf>: driven: <detail>` (information), `spare (it drives <n>)`
+     (information) or `failed: <why>` (a warning; the boot goes on, as for a virtio driver that fails). A bound
+     function's driver name is in the Diagnostic report's PCI list (`PciSeen::driver`), so the report says which
+     edition's driver took which device. A function that matches no driver is listed as before.
+  5. **One new `unsafe`** (`ext.rs`, `PciDevice::map_bar`): `Region::new` over the range `memory::map_mmio` just
+     mapped (AUDIT.md §1). The open image never reaches it.
+- **Not decided here.** Interrupts (MSI-X) for an edition's device: a driver polls (from the `tick` hook) until an
+  interface for vectors exists (ADR-339).
+
+## ADR-337 — An edition's configuration keys: tags 0xF000 to 0xFFFE, the TOML table `[ext]` (NOW-18)
+
+- **Status:** Accepted (NOW-18). No configuration format number: no open key is added, and an extension field
+  states the oldest open format its edition's kernel reads (`Field::since`).
+- **Decision.**
+  1. **Reserved for good.** Tags `0xF000..=0xFFFE` (0xFFFF stays unused) and the TOML top-level table `[ext]` belong
+     to editions; no open field will ever use either (a `cfg` test checks the table). An extension key is
+     `ext.<section>.<name>` (`[a-z0-9_]` parts, at most 64 bytes), so an edition's driver keeps its keys under its
+     own section (`[ext.gvnic]`). Allowed kinds: `Bool`, `UInt` (1, 2, 4 or 8 bytes), `Enum`, `Str`, `Strs`, with a
+     default inside their own range; at most 256 fields; tags strictly ascending; keys unique; stored, not derived.
+     `urmqtt_cfg::ext::check` is a `const fn`, run by `image!` at compile time and again by every parser and
+     builder that is handed a table (a bad table refuses every blob rather than guess).
+  2. **Fail closed in the open edition.** `Blob::parse` is now `Blob::parse_ext(bytes, &[])`: a record in the
+     reserved range is an unknown tag, as before, so the open kernel refuses an image configured for an edition
+     (`fatal: configuration refused: blob: unknown field tag`, smoke `edition`), and the open `urmqtt-config` and
+     the builder page refuse an `[ext]` table (an unknown key). An image never boots ignoring the configuration of
+     a driver it does not have (the rule of ADR-257).
+  3. **An edition's tools.** `Blob::parse_ext` accepts exactly the declared tags and checks each value against its
+     field; `Builder::with_extensions` / `add_extensions`, `build::sign_ext`, `urmqtt_config::load_ext` (the
+     kernel) and `urmqtt_config_schema::pack::pack_ext` (the packer: the open TOML plus the `[ext]` table, every
+     key a declared field and every value of its kind) are the edition's side. With an empty table each is its open
+     counterpart. The typed configuration (`CONFIG`) never sees an extension record; an edition's code reads its
+     keys with `ext::config_bool/uint/variant/str/strs` (the configured value or the field's default, also with no
+     configuration module). `Blob::records` lists every record, the reserved ones included; `Blob::present` still
+     lists only the open ones.
+  4. **Images.** An edition's slot is made by its own packer (`examples/edition`: `urmqtt-example-config
+     --out-slot`); `scripts/mkiso.sh --config-slot FILE` puts it into an image unchecked (the open tool cannot
+     read it), after checking its size and marker. The open paths of `mkiso.sh` are unchanged.
+  5. **Format versions.** The packer writes the lowest format that holds the configuration, an extension field's
+     `since` included; the reader refuses a record whose `since` is newer than the blob's version, as for an open
+     field. A blob with extension records carries the same header, fingerprint and signature as any other.
+- **Upgrade and downgrade.** Nothing changes for an existing configuration or store: no open key, no record, no
+  schema. An edition's configuration cannot be booted by the open image (by design).
+
+## ADR-338 — An edition's boot hooks: four fixed points (NOW-18)
+
+- **Status:** Accepted (NOW-18).
+- **Decision.** `Hooks { early, devices, ready, tick }`, each an `Option<fn()>` run on the boot CPU:
+  `early` in stage 2 once the heap, the stack canary and the crypto self-tests are up (after the configuration is
+  reported, before interrupts and before any device is probed); `devices` after the PCI scan and every probe,
+  while device memory can still be mapped; `ready` after the drivers' READY reports, just before `URMQTT READY`;
+  `tick` every 10 ms in interrupt context (bounded work, try locks only, like `vdev::tick`). A hook returns nothing:
+  one that cannot go on logs, or stops the kernel with `ext::fatal` (the kernel's own `fatal`). An edition that
+  adds anything prints one line before its `early` hook (`edition: <name>: <n> PCI driver(s), <m> configuration
+  key(s), hooks: ...`); the open edition prints nothing. *Not* offered: hooks per core, per connection or on the
+  data path (the broker's hot paths stay closed), and a hook that runs before the configuration is loaded.
+
+## ADR-339 — How NOW-18 was verified, and what it does not do (NOW-18)
+
+- **Status:** Accepted (NOW-18).
+- **Verified.** Host tests: `cfg` (`ext_tests.rs`: the reserved range free of open fields, the open reader and
+  builder refusing a reserved tag, round trips and defaults of every allowed kind, range and shape checks, every
+  rule of the table check, signatures, every flipped bit), `config` (an extension record refused by `load`, the
+  typed configuration the same with and without it), `config-schema` (`ext_tests.rs`: the open packer refusing
+  `[ext]`, `pack_ext` writing the reserved tags and packing what `pack` packs without `[ext]`, named errors for
+  unknown keys and wrong values), `kernel` (`ext.rs`: the edition rules, a virtio function never matching any
+  ID). Fuzz target `cfg_ext` (blob payloads into `parse_ext`, TOML into `pack_ext`: the table only adds, a blob
+  without a reserved record means the same to both parsers, whatever `pack_ext` writes parses and passes the
+  kernel's checks, and equals `pack`'s output whenever `pack` accepts), with seeds. Smoke group `edition` on
+  aarch64 (HVF) and x86_64 (TCG): the example edition's image binds one of two `edu` devices by its PCI ID, maps
+  BAR 0, runs the liveness check with `ext.example.edu_check = 0x12345678` (`-> 0xedcba987`), leaves the second
+  spare, runs all four hooks (the tick count at READY is not zero), reports a driver that refuses
+  (`ext.example.edu = "off"`), uses the defaults without a configuration of its own; the open image with the
+  same devices lists them and drives none, logs nothing of an edition, and refuses the edition's configuration;
+  the open `urmqtt-config` refuses the `[ext]` table. CI: the example's workspace is formatted, linted for the
+  host and the kernel target, built in the Kernel job (dev and prod) and booted in the `edition` smoke group.
+  The review re-ran the host tests of `cfg`, `config`, `config-schema`, `kernel` and `store`, the clippy sets of the
+  touched crates and the `edition` smoke group on aarch64 (HVF, TCG) and x86_64 (TCG). The other smoke groups were
+  started on this change but not all finished before the item closed; they are the release's full run, not this
+  item's evidence.
+- **The installer of an edition** (review): install mode copies the slot the kernel booted with onto the target
+  disk after parsing it (`urmqtt_store::install`). It parsed with the open table, so an edition's kernel booted with
+  an `[ext]` key refused to install ("no (single) unconfigured configuration slot"). It now parses with the image's
+  table (`write_image_ext`, `write_boot_image_ext`, given `ext::edition().config`); the open kernel passes the empty
+  table and is unchanged (host test `an_editions_installer_carries_its_extension_keys`).
+- **Not done (listed, not hidden).**
+  1. **NIC, disk, entropy and timer interfaces.** The computed scope named "NIC/disk/RNG/timer traits". They are
+     not in this change: the data path (`netproto`, `dataplane`, the RSS queues of ADR-310 to ADR-314) is written
+     for `VirtioNet`, the store's disk selection (`devices::DataDisk`, the boot disk by GUID, install and
+     Diagnostic modes) for virtio-blk and virtio-scsi, and the entropy pool's sources are a fixed, audited list.
+     Opening each is a design of its own with the hot path at stake, and none was needed to prove the library
+     (the ROADMAP's NOW-18 asks for registration, ID binding and the reserved range). An edition's driver can
+     drive its device, read its keys and run code at boot today; it cannot yet become the broker's network or
+     storage. Timers are the architecture's (generic timer, local APIC), not a device's, on every platform the
+     editions name.
+  2. **Interrupts for an edition's device** (MSI-X vectors): drivers poll for now.
+  3. **"Per-platform configuration sections"** beyond `[ext.<section>]`: the reserved table is the section
+     mechanism; there is no schema export of extension keys for the builder page, which knows the open keys only.
+  4. **The universal ISO, the installer and Secure Boot signing of an edition's image** are not exercised in QEMU:
+     the smoke group boots the edition's kernel from the raw image of `mkiso.sh --kernel`; `make universal` and
+     `make release-images` build the open image only. The installer's handling of an edition's slot is host-tested
+     (above). The open host tools that find and read a slot in an image (`urmqtt-config` image patching and
+     `show`, `urmqtt-disk`, `urmqtt_cfg::blob::find_slots`) parse with the open table, so they do not see an
+     edition's slot that holds an `[ext]` key; an edition reconfigures its image by rebuilding it with its own
+     packer and `mkiso.sh --config-slot`.
+  5. **The private repository itself** (`urmqtt-enterprise`) is not created and nothing is published.

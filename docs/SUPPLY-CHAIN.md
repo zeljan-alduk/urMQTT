@@ -118,6 +118,11 @@ ongoing work, in this order:
 - A new or updated dependency: `cargo vet` fails until it is audited, covered by an import, or added as an exemption. Adding an exemption is a visible diff of `config.toml`, to be justified in the pull request. For a crate linked into a kernel, prefer not to add it.
 - `cargo vet certify` records an audit of ours: only after reading the code (or the diff) against the criteria; the notes field says what was read.
 - Never `cargo vet regenerate exemptions` to make a failure go away.
+- The example edition (`examples/edition`, NOW-18) is a Cargo workspace of its own, so its `Cargo.lock` is outside
+  what `cargo vet`, `cargo deny` and the SBOM read. It may hold no third-party package that the workspace's lockfile
+  does not (same name, version and checksum): `scripts/check-lock-subset.py examples/edition/Cargo.lock Cargo.lock`,
+  run by the supply-chain job. After a dependency update of the workspace, refresh it with
+  `cp Cargo.lock examples/edition/ && (cd examples/edition && cargo metadata --offline >/dev/null)`.
 
 ## 4. cargo-deny and the advisory job
 
