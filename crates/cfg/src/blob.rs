@@ -352,6 +352,12 @@ impl<'a> Blob<'a> {
             .map(|(_, v)| v)
     }
 
+    /// Every record as (tag, value), in tag order, an edition's included
+    /// (ADR-337).
+    pub fn records(&self) -> impl Iterator<Item = (u16, &'a [u8])> + 'a {
+        Records(self.payload)
+    }
+
     /// Every present record, in tag order.
     pub fn present(&self) -> impl Iterator<Item = (&'static Field, &'a [u8])> + 'a {
         Records(self.payload).filter_map(|(t, v)| fields::by_tag(t).map(|f| (f, v)))

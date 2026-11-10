@@ -1,0 +1,11 @@
+[network]
+mqtt_tls_port = 9883
+
+[ext.fuzz]
+n = 7
+on = true
+mode = "b"
+name = "ab"
+
+[ext.z]
+list = ["a", "bcd"]
