@@ -70,6 +70,11 @@ the primitives above. Its configuration (`tls/src/server.rs`):
 
 The record layer is our own, in `tls/src/record.rs` (ADR-029). After the
 handshake, rustls's connection is turned into traffic secrets and dropped.
+The two application traffic secrets come from rustls's key log, which each
+session gets for itself: `accept` copies the shared `ServerConfig` with a key
+log that writes into that session's capture only, wiped when the handshake
+completes or the session is dropped (ADR-340). No table is shared between
+handshakes, and the ClientHello random plays no part.
 
 - **State per direction:** the 32-byte traffic secret and the 64-bit sequence
   number, 40 bytes in all. The secret is zeroised on drop. No expanded key

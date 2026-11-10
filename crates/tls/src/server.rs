@@ -85,30 +85,26 @@ impl SinceSecs for UnixTime {
 
 // --- traffic secret capture (for our own KeyUpdate) -----------------------
 
-/// One handshake's captured secrets. A slot is wiped in place when it is
-/// taken, dropped or evicted: the table never moves an entry (no `remove`,
-/// no `swap_remove`), so no copy is left in the vacated tail of the vector.
-/// A reallocation of the vector frees the old buffer, and the allocator
-/// poisons freed blocks (ADR-170), so a copy there does not survive either.
-#[derive(Clone, Copy)]
-struct Slot {
-    live: bool,
-    client_random: [u8; 32],
+/// One handshake's application traffic secrets, as rustls logs them. Each
+/// session has its own capture (ADR-340): rustls's key log is a field of
+/// the `ServerConfig`, so [`TlsServer::accept`] gives every connection a
+/// copy of the shared config whose key log writes into that session's
+/// capture and nowhere else. The secrets live exactly as long as the
+/// handshake: they are taken (and wiped) when it completes, and wiped on
+/// drop whichever way it ends (error, TCP close, reset, timeout). There is
+/// no shared table to fill, and no lookup by the attacker-chosen
+/// ClientHello random, which a ClientHello fragmented over several records
+/// would also have made unreliable (CRYPTO-1, CRYPTO-2 of the v0.6.0
+/// review).
+#[derive(Default)]
+struct Captured {
     client: Option<[u8; 32]>,
     server: Option<[u8; 32]>,
 }
 
-impl Slot {
-    const VACANT: Self = Self {
-        live: false,
-        client_random: [0; 32],
-        client: None,
-        server: None,
-    };
-
-    /// Overwrites the slot with the vacant state (volatile, not elided).
+impl Captured {
+    /// Overwrites both secrets (volatile, not elided).
     fn wipe(&mut self) {
-        self.client_random.zeroize();
         if let Some(c) = self.client.as_mut() {
             c.zeroize();
         }
@@ -117,95 +113,57 @@ impl Slot {
         }
         self.client = None;
         self.server = None;
-        self.live = false;
-    }
-}
-
-/// Traffic secrets by ClientHello random, while handshakes are in flight.
-#[derive(Default)]
-struct Captured {
-    entries: Vec<Slot>,
-}
-
-impl Captured {
-    fn position(&self, cr: &[u8; 32]) -> Option<usize> {
-        self.entries
-            .iter()
-            .position(|e| e.live && &e.client_random == cr)
     }
 
-    /// The slot for `cr`: an existing one, a vacant one, a new one, or (at
-    /// the bound) the oldest, wiped first.
-    fn slot_for(&mut self, cr: &[u8; 32]) -> Option<&mut Slot> {
-        let idx = match self.position(cr) {
-            Some(i) => i,
-            None => {
-                let i = match self.entries.iter().position(|e| !e.live) {
-                    Some(i) => i,
-                    None if self.entries.len() >= MAX_CAPTURED => {
-                        if let Some(first) = self.entries.first_mut() {
-                            first.wipe();
-                        }
-                        0
-                    }
-                    None => {
-                        self.entries.push(Slot::VACANT);
-                        self.entries.len() - 1
-                    }
-                };
-                let e = self.entries.get_mut(i)?;
-                *e = Slot::VACANT;
-                e.live = true;
-                e.client_random = *cr;
-                i
-            }
-        };
-        self.entries.get_mut(idx)
-    }
-
-    /// The secrets of `cr`, copied out; the slot is wiped.
-    fn take(&mut self, cr: &[u8; 32]) -> Option<([u8; 32], [u8; 32])> {
-        let i = self.position(cr)?;
-        let e = self.entries.get_mut(i)?;
-        let out = e.client.zip(e.server);
-        e.wipe();
+    /// Both secrets, copied out (client, server); the capture is wiped.
+    fn take(&mut self) -> Option<([u8; 32], [u8; 32])> {
+        let out = self.client.zip(self.server);
+        self.wipe();
         out
     }
 }
 
-/// Bound on concurrently captured handshakes (admission control keeps the
-/// real number far lower). Under Miri only, a small bound with the same
-/// eviction code: `the_bound_evicts_the_oldest_and_wipes_it` fills the table
-/// through a linear scan per insert, which at 4096 ran for more than ten
-/// minutes under Miri on an Apple M4 Pro (ADR-262); `cargo test` keeps 4096.
-const MAX_CAPTURED: usize = if cfg!(miri) { 64 } else { 4096 };
+impl Drop for Captured {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
 
-static SECRETS: SpinLock<Captured> = SpinLock::new(Captured {
-    entries: Vec::new(),
-});
+/// The key log of one session (see [`Captured`]).
+struct SecretCapture(SpinLock<Captured>);
 
-#[derive(Debug)]
-struct SecretCapture;
+impl Default for SecretCapture {
+    fn default() -> Self {
+        Self(SpinLock::new(Captured::default()))
+    }
+}
+
+impl fmt::Debug for SecretCapture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SecretCapture")
+    }
+}
+
+impl SecretCapture {
+    fn take(&self) -> Option<([u8; 32], [u8; 32])> {
+        self.0.lock().take()
+    }
+
+    fn wipe(&self) {
+        self.0.lock().wipe();
+    }
+}
 
 impl KeyLog for SecretCapture {
-    fn log(&self, label: &str, client_random: &[u8], secret: &[u8]) {
-        let (Ok(cr), Ok(s)) = (
-            <[u8; 32]>::try_from(client_random),
-            <[u8; 32]>::try_from(secret),
-        ) else {
+    fn log(&self, label: &str, _client_random: &[u8], secret: &[u8]) {
+        let Ok(s) = <[u8; 32]>::try_from(secret) else {
             return;
         };
-        let client = label == "CLIENT_TRAFFIC_SECRET_0";
-        if !client && label != "SERVER_TRAFFIC_SECRET_0" {
-            return;
-        }
-        let mut g = SECRETS.lock();
-        if let Some(e) = g.slot_for(&cr) {
-            if client {
-                e.client = Some(s);
-            } else {
-                e.server = Some(s);
-            }
+        let mut g = self.0.lock();
+        match label {
+            "CLIENT_TRAFFIC_SECRET_0" => g.client = Some(s),
+            "SERVER_TRAFFIC_SECRET_0" => g.server = Some(s),
+            _ => {}
         }
     }
 
@@ -214,60 +172,51 @@ impl KeyLog for SecretCapture {
     }
 }
 
-fn take_secrets(client_random: &[u8; 32]) -> Option<([u8; 32], [u8; 32])> {
-    SECRETS.lock().take(client_random)
-}
-
-fn drop_secrets(client_random: &[u8; 32]) {
-    let _ = take_secrets(client_random);
-}
-
 #[cfg(test)]
 mod capture_tests {
     use super::*;
 
-    fn all_zero(s: &Slot) -> bool {
-        s.client_random == [0; 32] && s.client.is_none() && s.server.is_none() && !s.live
+    fn wiped(c: &Captured) -> bool {
+        c.client.is_none() && c.server.is_none()
     }
 
+    /// Replaces the tests of the former global table (taken or dropped
+    /// entries leave nothing behind): the capture is now one per session.
     #[test]
-    fn a_taken_or_dropped_entry_leaves_nothing_behind() {
-        let mut c = Captured::default();
-        for n in 0..5u8 {
-            let cr = [n + 1; 32];
-            let e = c.slot_for(&cr).unwrap();
-            e.client = Some([0xc0 + n; 32]);
-            e.server = Some([0xd0 + n; 32]);
-        }
-        assert_eq!(c.take(&[3; 32]), Some(([0xc2; 32], [0xd2; 32])));
-        assert_eq!(c.take(&[3; 32]), None, "taken once");
-        // The vacated slot is wiped in place, not merely unlinked.
-        assert!(all_zero(&c.entries[2]));
-        // A vacant slot is reused before the vector grows.
-        let before = c.entries.len();
-        c.slot_for(&[9; 32]).unwrap().client = Some([1; 32]);
-        assert_eq!(c.entries.len(), before);
-        // An entry with only one secret yields nothing and is still wiped.
-        assert_eq!(c.take(&[9; 32]), None);
-        assert!(c.entries.iter().all(|e| e.live || all_zero(e)));
+    fn a_taken_or_dropped_capture_leaves_nothing_behind() {
+        let cap = SecretCapture::default();
+        cap.log("CLIENT_TRAFFIC_SECRET_0", &[1; 32], &[0xc0; 32]);
+        cap.log("SERVER_TRAFFIC_SECRET_0", &[1; 32], &[0xd0; 32]);
+        // Other labels and wrong lengths are ignored.
+        cap.log("CLIENT_HANDSHAKE_TRAFFIC_SECRET", &[1; 32], &[0xee; 32]);
+        cap.log("SERVER_TRAFFIC_SECRET_0", &[1; 32], &[0xee; 48]);
+        assert_eq!(cap.take(), Some(([0xc0; 32], [0xd0; 32])));
+        assert_eq!(cap.take(), None, "taken once");
+        assert!(wiped(&cap.0.lock()));
+        // Only one secret yields nothing and is still wiped.
+        cap.log("CLIENT_TRAFFIC_SECRET_0", &[2; 32], &[0xc1; 32]);
+        assert_eq!(cap.take(), None);
+        assert!(wiped(&cap.0.lock()));
+        // What Drop runs (the abandoned-handshake path) clears both.
+        let mut c = Captured {
+            client: Some([0xaa; 32]),
+            server: Some([0xbb; 32]),
+        };
+        c.wipe();
+        assert!(wiped(&c));
     }
 
+    /// The client random plays no part: two sessions that log under the
+    /// same random (an attacker can copy a victim's) keep their own secrets.
     #[test]
-    fn the_bound_evicts_the_oldest_and_wipes_it() {
-        let mut c = Captured::default();
-        for n in 0..MAX_CAPTURED {
-            let mut cr = [0u8; 32];
-            cr[..8].copy_from_slice(&(n as u64 + 1).to_le_bytes());
-            c.slot_for(&cr).unwrap().client = Some([0xaa; 32]);
+    fn sessions_do_not_share_secrets_even_with_the_same_random() {
+        let (a, b) = (SecretCapture::default(), SecretCapture::default());
+        for (cap, v) in [(&a, 1u8), (&b, 2u8)] {
+            cap.log("CLIENT_TRAFFIC_SECRET_0", &[7; 32], &[v; 32]);
+            cap.log("SERVER_TRAFFIC_SECRET_0", &[7; 32], &[v + 0x10; 32]);
         }
-        assert_eq!(c.entries.len(), MAX_CAPTURED);
-        let mut cr = [0u8; 32];
-        cr[..8].copy_from_slice(&(u64::MAX).to_le_bytes());
-        let e = c.slot_for(&cr).unwrap();
-        // The evicted oldest slot was reused for the newcomer: nothing of it
-        // is left (no client secret).
-        assert!(e.client.is_none());
-        assert_eq!(c.entries.len(), MAX_CAPTURED);
+        assert_eq!(a.take(), Some(([1; 32], [0x11; 32])));
+        assert_eq!(b.take(), Some(([2; 32], [0x12; 32])));
     }
 }
 
@@ -349,9 +298,14 @@ pub fn serial_tag(serial: &[u8]) -> u64 {
 }
 
 /// Roles of recently verified end-entity certificates, by SHA-256 of the
-/// DER, from verification until the handshake completes. Bounded like the
-/// captured secrets.
+/// DER, from verification until the handshake completes, bounded by
+/// [`MAX_ROLES`]. A role that is evicted or missing is not trusted: the
+/// chain is verified again at the end of the handshake (`client_identity`).
 static ROLES: SpinLock<Vec<([u8; 32], CertRole)>> = SpinLock::new(Vec::new());
+
+/// Bound on remembered roles (admission control keeps the real number of
+/// handshakes in flight far lower).
+const MAX_ROLES: usize = 4096;
 
 fn cert_hash(der: &[u8]) -> [u8; 32] {
     use sha2::Digest;
@@ -368,7 +322,7 @@ fn record_role(der: &[u8], role: CertRole) {
         e.1 = role;
         return;
     }
-    if g.len() >= MAX_CAPTURED {
+    if g.len() >= MAX_ROLES {
         g.remove(0);
     }
     g.push((h, role));
@@ -627,7 +581,7 @@ impl TlsServer {
             .with_single_cert(chain, key)
             .map_err(|_| TlsError::Config("server certificate/key mismatch or unsupported key"))?;
         config.enable_secret_extraction = true;
-        config.key_log = Arc::new(SecretCapture);
+        // Each session installs its own capture (`accept`, ADR-340).
         config.max_early_data_size = 0;
         if setup.resumption && client_auth {
             config.ticketer = Arc::new(crate::ticket::Ticketer(setup.tickets.clone()));
@@ -645,12 +599,18 @@ impl TlsServer {
     }
 
     pub fn accept(&self) -> Result<TlsSession, TlsError> {
-        let conn = UnbufferedServerConnection::new(self.config.clone())?;
+        // A shallow copy of the shared config (reference counts and a few
+        // empty vectors) whose key log is this session's own (ADR-340).
+        let capture = Arc::new(SecretCapture::default());
+        let mut config = ServerConfig::clone(&self.config);
+        config.key_log = capture.clone();
+        let conn = UnbufferedServerConnection::new(Arc::new(config))?;
         Ok(TlsSession {
             state: State::Handshake(Box::new(Hs {
                 conn,
                 inbuf: Vec::new(),
-                random: None,
+                checked: false,
+                capture,
                 revoked: self.revoked.clone(),
                 roles: self.roles.clone(),
             })),
@@ -681,7 +641,10 @@ fn flush_alert(conn: &mut UnbufferedServerConnection, inbuf: &mut Vec<u8>, tx: &
 struct Hs {
     conn: UnbufferedServerConnection,
     inbuf: Vec<u8>,
-    random: Option<[u8; 32]>,
+    /// The first record header looked like a ClientHello.
+    checked: bool,
+    /// This handshake's traffic secrets, wiped when `Hs` is dropped.
+    capture: Arc<SecretCapture>,
     /// For resumed sessions: no certificate is verified then, so the one
     /// in the ticket is checked against the list here.
     revoked: Arc<RevocationList>,
@@ -736,17 +699,16 @@ pub struct TlsSession {
     client_auth: bool,
 }
 
-/// ClientHello.random from the first record (RFC 8446 §4.1.2).
-fn client_random(buf: &[u8]) -> Option<Result<[u8; 32], TlsError>> {
-    if buf.len() < 43 {
+/// Whether the input starts like a ClientHello: a handshake record (type
+/// 22, version 3.x) whose body starts with a ClientHello (type 1), or `None`
+/// until the first 6 bytes are in. Only the first fragment's first byte is
+/// looked at; the ClientHello itself may be fragmented over several
+/// records (RFC 8446 §5.1), which rustls reassembles.
+fn looks_like_client_hello(buf: &[u8]) -> Option<bool> {
+    if buf.len() < 6 {
         return None;
     }
-    let ok = buf.first() == Some(&22) && buf.get(1) == Some(&3) && buf.get(5) == Some(&1);
-    if !ok {
-        return Some(Err(TlsError::NotTls));
-    }
-    let r: Option<[u8; 32]> = buf.get(11..43).and_then(|s| s.try_into().ok());
-    Some(r.ok_or(TlsError::NotTls))
+    Some(buf.first() == Some(&22) && buf.get(1) == Some(&3) && buf.get(5) == Some(&1))
 }
 
 impl TlsSession {
@@ -777,10 +739,10 @@ impl TlsSession {
                 if hs.inbuf.len() > record::HEADER + record::MAX_CIPHERTEXT * 4 {
                     return Err(TlsError::Handshake("handshake flight too large".into()));
                 }
-                if hs.random.is_none() {
-                    match client_random(&hs.inbuf) {
-                        Some(Ok(r)) => hs.random = Some(r),
-                        Some(Err(e)) => return Err(e),
+                if !hs.checked {
+                    match looks_like_client_hello(&hs.inbuf) {
+                        Some(true) => hs.checked = true,
+                        Some(false) => return Err(TlsError::NotTls),
                         None => return Ok(Event::None),
                     }
                 }
@@ -823,9 +785,7 @@ impl TlsSession {
             let state = match state {
                 Ok(s) => s,
                 Err(e) => {
-                    if let Some(r) = hs.random {
-                        drop_secrets(&r);
-                    }
+                    hs.capture.wipe();
                     // rustls queued its fatal alert; it comes out on the
                     // next call (RFC 8446 §6: the peer learns why). The
                     // consumed input goes first, as rustls expects.
@@ -886,11 +846,15 @@ impl TlsSession {
         let Hs {
             conn,
             inbuf,
-            random,
+            checked,
+            capture,
             revoked,
             roles,
         } = *hs;
-        let random = random.ok_or(TlsError::NotTls)?;
+        if !checked {
+            return Err(TlsError::NotTls);
+        }
+        // Every exit below drops `capture`, which wipes the secrets.
         let resumed = conn.handshake_kind() == Some(HandshakeKind::Resumed);
         // Without client authentication (ADR-272) there is no certificate to
         // check; a session of such a server never resumes (no tickets).
@@ -907,8 +871,9 @@ impl TlsSession {
         };
         let (secrets, kernel) = conn.dangerous_into_kernel_connection()?;
         drop(kernel);
-        let (rx_secret, tx_secret) =
-            take_secrets(&random).ok_or(TlsError::Internal("traffic secrets not captured"))?;
+        let (rx_secret, tx_secret) = capture
+            .take()
+            .ok_or(TlsError::Internal("traffic secrets not captured"))?;
         let (suite, rx_key, rx_iv, tx_key, tx_iv) = match (&secrets.rx.1, &secrets.tx.1) {
             (
                 ConnectionTrafficSecrets::Aes128Gcm { key: rk, iv: ri },

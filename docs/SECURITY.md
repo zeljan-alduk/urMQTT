@@ -21,7 +21,7 @@ which says what it gives up.
 |---|---|---|
 | Server TLS private key | In the image's configuration slot (ADR-215) | Impersonating the broker; decrypting nothing (TLS 1.3 is forward secret), but accepting devices. |
 | Session-ticket keys | Random per boot (CSPRNG), in RAM only; current for 12 h, previous for 12 h, then zeroised (H2, ADR-054) | Forging resumption tickets. Never stored, never derived from the image: a copy of the image or disk forges nothing. |
-| Traffic secrets | Per connection, in RAM, zeroized on drop | Reading or injecting one device's traffic. |
+| Traffic secrets | Per connection, in RAM, zeroized on drop (during the handshake too: one capture per session, ADR-340) | Reading or injecting one device's traffic. |
 | Device identities and the revocation list | CA embedded; revocations embedded and in SQLite | Who may connect. |
 | Control signing key (Ed25519) | **Offline**, never in the image: a file on an operator machine (dev) or an HSM/KMS behind `urmqtt-control --sign-cmd` (prod). The image holds only the public key (`deploy/<env>/control.pub`). | Revoking, unrevoking and allowlisting devices at runtime. |
 | Trust anchors by role | `[trust] operational` and `bootstrap` CA lists, embedded | Which CA grants which rights; rotation with overlap. |

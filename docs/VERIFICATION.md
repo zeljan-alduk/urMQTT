@@ -65,11 +65,11 @@ Bypass: run the CI workflow by hand (`workflow_dispatch`) with `miri-cache`
 off, or delete the `miri-ok-*` caches (`gh cache delete`).
 
 **Shrunk under Miri only** (same code, fewer iterations; `cargo test` runs the
-full size): tls `server::capture_tests::the_bound_evicts_the_oldest_and_wipes_it`
-(`MAX_CAPTURED` is 64 under Miri instead of 4096: the table fills through a
-linear scan per insert, more than 10 minutes under Miri on an Apple M4 Pro at
-4096) and tls `identity::tests::the_light_serial_reader_agrees_with_the_full_decoder`
-(40 random corruptions per certificate instead of 400; 534 s under Miri).
+full size): tls `identity::tests::the_light_serial_reader_agrees_with_the_full_decoder`
+(40 random corruptions per certificate instead of 400; 534 s under Miri). The
+other one, tls `server::capture_tests::the_bound_evicts_the_oldest_and_wipes_it`
+(`MAX_CAPTURED` 64 under Miri), went with the global capture table in ADR-340:
+each session has its own capture now, so there is no bound to test.
 
 Excluded, and why:
 
