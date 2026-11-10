@@ -328,6 +328,16 @@ pub const CONTROL_TOPIC: &str = "$urmqtt/control";
 /// (counted), so a flooding control service costs bounded work.
 const MAX_CONTROL_BACKLOG: usize = 64;
 
+/// How long a connection may stay without a session: from [`Broker::open`]
+/// to its CONNECT (ADR-362). MQTT 3.1.4: the server should close a
+/// connection whose CONNECT does not come within a reasonable time. The
+/// transport's own handshake deadline stops once the connection is handed
+/// to the broker; without this one a connection that never sent CONNECT
+/// was held forever (and its slot with it), and a CONNECT sent after its
+/// identity had been disallowed was accepted. Input before the CONNECT does
+/// not move it: a client that drips a byte at a time gets no longer.
+pub const CONNECT_TIMEOUT_MS: u64 = 10_000;
+
 /// What an operator asked for on a `$SYS/` request topic (O1, O2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SysKind {
@@ -1170,12 +1180,32 @@ impl Broker {
         keep: impl Fn(&str, Role) -> bool,
         why: CloseReason,
     ) -> usize {
-        let doomed: Vec<ConnId> = self
+        let mut doomed: Vec<ConnId> = self
             .sessions
             .iter()
             .filter(|(_, s)| !keep(s.acl_id(), s.role))
             .filter_map(|(_, s)| s.conn())
             .collect();
+        // A connection with an identity and no session yet (authenticated,
+        // its CONNECT still to come) is judged by the role that CONNECT
+        // would give it (ADR-362): otherwise it is not closed, and the
+        // CONNECT that follows is accepted for an identity that may no longer
+        // connect.
+        doomed.extend(
+            self.conns
+                .iter()
+                .filter(|(_, k)| k.session.is_none() && k.close.is_none())
+                .filter_map(|(c, k)| {
+                    let e = k.extra.as_ref()?;
+                    let id = e.identity.as_deref()?;
+                    let role = match k.login() {
+                        Some(r) => r,
+                        None if e.bootstrap => Role::Bootstrap,
+                        None => self.cfg.acl.role(id),
+                    };
+                    (!keep(id, role)).then_some(c)
+                }),
+        );
         for &c in &doomed {
             self.mark_close(c, why);
         }
@@ -1981,7 +2011,11 @@ impl Broker {
         if conn.close.is_some() {
             return;
         }
-        conn.last_rx_ms = now_ms;
+        // Before the CONNECT, `last_rx_ms` stays the time of `open`: the
+        // CONNECT deadline (ADR-362). The CONNECT itself sets it.
+        if conn.session.is_some() {
+            conn.last_rx_ms = now_ms;
+        }
         conn.inbuf.extend_from_slice(data);
         if conn.flow != 0 {
             self.held_input(c, now_ms);
@@ -2291,6 +2325,19 @@ impl Broker {
         for (i, k) in self.conns.iter_mut() {
             // A connection whose input is held for back-pressure is alive:
             // its PINGREQ waits in the held bytes (ADR-269).
+            // No CONNECT within CONNECT_TIMEOUT_MS of `open` (ADR-362): no
+            // session, so nobody to tell; closed.
+            if k.close.is_none()
+                && k.session.is_none()
+                && now_ms.saturating_sub(k.last_rx_ms) > CONNECT_TIMEOUT_MS
+            {
+                k.close = Some(CloseReason::KeepAliveTimeout);
+                if !k.ready {
+                    k.ready = true;
+                    self.ready.push(i);
+                }
+                continue;
+            }
             if k.close.is_none()
                 && k.flow == 0
                 && k.keepalive_s > 0
@@ -2804,6 +2851,7 @@ impl Broker {
         if let Some(k) = self.conn(c) {
             k.session = Some(sid);
             k.keepalive_s = keep_alive;
+            k.last_rx_ms = now_ms;
             if will.is_some() {
                 k.extra_mut().will = will;
             }
