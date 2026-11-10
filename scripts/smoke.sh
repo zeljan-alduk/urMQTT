@@ -1054,8 +1054,14 @@ fin_wait2() {
         # At once: a "mem: 0" line after the devices close would prove nothing.
         kill_vm
         grep -v '^loadgen: bench-' "$log.client" >>"$log" 2>/dev/null || true
-        check "fin-wait2: half-open peers end after FIN-WAIT-2, no FIN loop [$accel]" "$log" "$status" \
-            "loadgen: hold: 50 of 50 connections established" "mem: 0 connection\(s\)" \
+        # Since ADR-355 the broker's own close has a deadline (5 s): these
+        # connections are reset there, before FIN-WAIT-2 (60 s) could end them
+        # and before the 10 s memory report sees them, so the proof that they
+        # all ended is the deadline's log line (it names every power of two,
+        # 16 per core at least for 50 devices on two cores), not "mem: 0".
+        check "fin-wait2: half-open peers end at the close deadline, no FIN loop [$accel]" "$log" "$status" \
+            "loadgen: hold: 50 of 50 connections established" \
+            "tcp: 16 close\(s\) not finished within 5000 ms reset on core" \
             "loadgen: hold: 50 connections kept for 90 s" "$NO_FAULT"
     done
 }
