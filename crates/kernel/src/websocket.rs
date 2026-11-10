@@ -862,6 +862,17 @@ impl WsState {
             return Decision::Refuse(5);
         };
         let ip = w.ip;
+        // An address locked out after this connection was opened is not
+        // judged (ADR-363), as on the plaintext listener.
+        if let Some(shared) = SHARED.get()
+            && shared
+                .sources
+                .lock()
+                .locked_out(crate::plain::src(ip), (now_ms / 1000) as u32)
+        {
+            bump(&STATS.auth_failed);
+            return Decision::Refuse(5);
+        }
         // Owned, so that the authenticator is free again (it borrows the
         // identity of a run-time account from its table).
         let verdict = match auth.authenticate(ip.as_v4(), p.username, p.password) {
@@ -870,6 +881,8 @@ impl WsState {
         };
         match verdict {
             Ok(identity) => {
+                // (This does not clear the address's failure count,
+                // ADR-363.)
                 if let Some(shared) = SHARED.get() {
                     shared.sources.lock().succeeded(crate::plain::src(ip));
                 }

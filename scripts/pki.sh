@@ -119,12 +119,18 @@ ca_plain() {
     die "cannot open the CA key $1/offline/ca.key (wrong passphrase?)"
 }
 
-# sign_leaf <pki> <csr> <out.pem> <extfile> <days>
+# cns <x509|req> <file>: the subject's CN values, one per line (any string type).
+cns() { ossl "$1" -in "$2" -noout -subject -nameopt multiline | sed -n 's/^ *commonName *= *//p'; }
+
+# sign_leaf <pki> <csr> <out.pem> <extfile> <days> <subject>
+# The subject is always ours (-subj): the CSR's is never copied (ADR-360: a CSR subject
+# with two CNs of different string types was read as one identity here and as another
+# by the broker).
 sign_leaf() {
-    local pki=$1 csr=$2 out=$3 ext=$4 days=$5
+    local pki=$1 csr=$2 out=$3 ext=$4 days=$5 subj=$6
     new_file "$out"
     ca_plain "$pki"
-    ossl x509 -req -in "$csr" -CA "$pki/deploy/ca.pem" -CAkey "$TMP/ca-plain.key" \
+    ossl x509 -req -in "$csr" -CA "$pki/deploy/ca.pem" -CAkey "$TMP/ca-plain.key" -subj "$subj" \
         -set_serial "0x$(serial)" -sha256 -days "$days" -extfile "$ext" -out "$out" 2>"$TMP/x509.log" \
         || { cat "$TMP/x509.log" >&2; die "signing $out failed"; }
     chmod 644 "$out"
@@ -189,7 +195,7 @@ new_server() {
     [[ -n $san ]] || die "the server certificate needs at least one --dns NAME or --ip ADDR (what devices connect to)"
     ec_key "$pki/deploy/$stem.key"
     ossl req -new -key "$pki/deploy/$stem.key" -subj "/O=$(org_of "$pki")/CN=$cn" -out "$TMP/server.csr"
-    sign_leaf "$pki" "$TMP/server.csr" "$pki/deploy/$stem.pem" "$(server_ext "$san")" "$days"
+    sign_leaf "$pki" "$TMP/server.csr" "$pki/deploy/$stem.pem" "$(server_ext "$san")" "$days" "/O=$(org_of "$pki")/CN=$cn"
     record "$pki" "$pki/deploy/$stem.pem" server "$cn"
 }
 
@@ -202,7 +208,7 @@ leaf() {
     new_file "$dir/$id.pem"
     ec_key "$dir/$id.key"
     ossl req -new -key "$dir/$id.key" -subj "/O=$(org_of "$pki")/CN=$id" -out "$TMP/leaf.csr"
-    sign_leaf "$pki" "$TMP/leaf.csr" "$dir/$id.pem" "$(client_ext "$kind" "$id")" "$days"
+    sign_leaf "$pki" "$TMP/leaf.csr" "$dir/$id.pem" "$(client_ext "$kind" "$id")" "$days" "/O=$(org_of "$pki")/CN=$id"
     record "$pki" "$dir/$id.pem" "$kind" "$id"
     echo "$kind '$id': $dir/$id.pem, $dir/$id.key ($days days)"
 }
@@ -310,11 +316,15 @@ cmd_sign_csr() {
     need_pki "$dir"
     ossl req -in "$csr" -noout -verify 2>/dev/null || die "$csr is not a valid, self-signed CSR"
     ossl req -in "$csr" -noout -text | grep -q 'ASN1 OID: prime256v1' || die "$csr: the key must be ECDSA P-256"
-    id=$(ossl req -in "$csr" -noout -subject -nameopt multiline | sed -n 's/^ *commonName *= *//p' | head -1)
+    # Exactly one CN (of any string type): the broker refuses a certificate whose subject has
+    # two, and a CSR that carries two is an attempt to be read as two different names (ADR-360).
+    [[ $(cns req "$csr" | wc -l | tr -d ' ') == 1 ]] || die "$csr: the subject must have exactly one CN (the identity)"
+    id=$(cns req "$csr")
     check_id "$id"
     mkdir -p "$dir/${kind}s"
-    # Only the public key and the CN of the CSR are used; its requested extensions are ignored.
-    sign_leaf "$dir" "$csr" "$dir/${kind}s/$id.pem" "$(client_ext "$kind" "$id")" "$days"
+    # Only the public key and the CN of the CSR are used: the subject is built here
+    # (/O=org/CN=id) and the CSR's requested extensions are ignored.
+    sign_leaf "$dir" "$csr" "$dir/${kind}s/$id.pem" "$(client_ext "$kind" "$id")" "$days" "/O=$(org_of "$dir")/CN=$id"
     record "$dir" "$dir/${kind}s/$id.pem" "$kind" "$id"
     echo "$kind '$id': $dir/${kind}s/$id.pem ($days days; the key stays on the device)"
 }
@@ -451,8 +461,10 @@ cmd_check() {
         [[ -f $f ]] || continue
         local kind cn uri
         kind=$(basename "$(dirname "$f")"); kind=${kind%s}
-        cn=$(ossl x509 -in "$f" -noout -subject -nameopt multiline | sed -n 's/^ *commonName *= *//p' | head -1)
+        cn=$(cns x509 "$f" | head -1)
         uri=$(ossl x509 -in "$f" -noout -ext subjectAltName 2>/dev/null | grep -o "URI:urn:urmqtt:[a-z]*:[^, ]*" | head -1 || true)
+        [[ $(cns x509 "$f" | wc -l | tr -d ' ') == 1 ]] || fail "$f: the subject must have exactly one CN (the broker gives a certificate with more than one no identity)"
+        [[ $(ossl x509 -in "$f" -noout -ext subjectAltName 2>/dev/null | grep -o "URI:urn:urmqtt:" | wc -l | tr -d ' ') -le 1 ]] || fail "$f: more than one urn:urmqtt: SAN URI (the broker gives it no identity)"
         [[ $cn =~ $ID_RE ]] || fail "$f: CN '$cn' is not a usable identity"
         [[ -z $uri || $uri == "URI:urn:urmqtt:$kind:$cn" ]] || fail "$f: SAN $uri does not match CN '$cn' (identity_field cn and san_uri would disagree)"
         ossl verify -CAfile "$TMP/anchors.pem" "$f" >/dev/null 2>&1 || fail "$f does not verify against the operational CAs here"

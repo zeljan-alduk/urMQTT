@@ -75,7 +75,31 @@ serial=$("$OPENSSL" x509 -in "$P/devices/device-042.pem" -noout -serial | cut -d
 grep -qx "$serial" "$P/deploy/revoked.txt" && ok "its serial is in revoked.txt" || bad "revoked.txt"
 "$PKI" revoke "$P" --serial "$serial" | grep -q "already revoked" && ok "revoking twice is a no-op" || bad "revoke twice"
 must "a second operational CA (rotation)" "$PKI" ca "$P" ca-2
-[[ $(wc -l <"$P/issued.tsv") -eq 5 ]] && ok "issued.tsv lists the 5 leaf certificates (server, 3 devices and services by key, 1 by CSR)" || bad "issued.tsv: $(wc -l <"$P/issued.tsv") lines"
+
+# ADR-360 (security review v0.6.0, AUTHZ-1): a CSR whose subject has two CNs of different
+# string types (T61String "sensor_042", which openssl reads first, and PrintableString
+# "operator", which the broker read) was signed as device "sensor_042" with the CSR's
+# subject copied, and the broker authenticated it as "operator". Refused now; and the
+# subject of a signed CSR is always /O=<org>/CN=<id>, whatever the CSR asked for.
+cat >"$TMP/two-cn.cnf" <<'EOF'
+[req]
+distinguished_name = dn
+prompt = no
+string_mask = default
+[dn]
+0.commonName = sensor_042
+1.commonName = operator
+EOF
+"$OPENSSL" req -new -key "$TMP/dev42.key" -config "$TMP/two-cn.cnf" -out "$TMP/two-cn.csr"
+mustnot "sign-csr refuses a subject with two CNs" "$PKI" sign-csr "$P" "$TMP/two-cn.csr"
+[[ $("$PKI" sign-csr "$P" "$TMP/two-cn.csr" 2>&1 || true) == *"exactly one CN"* ]] && ok "... for that reason" || bad "sign-csr: two CNs not named"
+[[ ! -e $P/devices/sensor_042.pem ]] && ok "... and issues nothing" || bad "a two-CN CSR was signed"
+"$OPENSSL" req -new -key "$TMP/dev42.key" -subj "/O=Someone Else/OU=ops/CN=device-044" -out "$TMP/dev44.csr"
+must "sign-csr: a CSR with more subject fields than the CN" "$PKI" sign-csr "$P" "$TMP/dev44.csr"
+subj=$("$OPENSSL" x509 -in "$P/devices/device-044.pem" -noout -subject -nameopt RFC2253)
+[[ $subj == "subject=CN=device-044,O=Example Fleet" ]] && ok "sign-csr builds the subject itself (the CSR's is not copied)" || bad "sign-csr subject: $subj"
+
+[[ $(wc -l <"$P/issued.tsv") -eq 6 ]] && ok "issued.tsv lists the 6 leaf certificates (server, 3 devices and services by key, 2 by CSR)" || bad "issued.tsv: $(wc -l <"$P/issued.tsv") lines"
 
 # A deploy/prod/ made of the output, with the ACL that names the identities.
 D=$TMP/prod
@@ -94,6 +118,22 @@ cp "$P/deploy/server.key" "$TMP/server.key.good"
 "$OPENSSL" genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$D/server.key" 2>/dev/null
 mustnot "check: a server key that does not belong to the certificate fails" "$PKI" check "$D"
 cp "$TMP/server.key.good" "$D/server.key"
+# `check` refuses a client certificate with two CNs (made here with OpenSSL directly, as
+# an outside enrollment service might have issued it), and one with two identity URIs.
+mkdir -p "$D/devices"
+printf 'subjectAltName=URI:urn:urmqtt:device:sensor_042\n' >"$TMP/two-cn.ext"
+"$OPENSSL" x509 -req -in "$TMP/two-cn.csr" -CA "$P/deploy/ca.pem" -CAkey "$P/offline/ca.key" -passin env:URMQTT_CA_PASSPHRASE \
+    -set_serial 0x7e01 -days 30 -extfile "$TMP/two-cn.ext" -out "$D/devices/sensor_042.pem" 2>/dev/null
+mustnot "check: a client certificate with two CNs fails" "$PKI" check "$D"
+[[ $("$PKI" check "$D" 2>&1 || true) == *"must have exactly one CN"* ]] && ok "... for that reason" || bad "check: two CNs not named"
+rm "$D/devices/sensor_042.pem"
+printf 'subjectAltName=URI:urn:urmqtt:device:device-045,URI:urn:urmqtt:service:operator\n' >"$TMP/two-uri.ext"
+"$OPENSSL" x509 -req -in "$TMP/dev44.csr" -CA "$P/deploy/ca.pem" -CAkey "$P/offline/ca.key" -passin env:URMQTT_CA_PASSPHRASE \
+    -subj "/O=Example Fleet/CN=device-045" -set_serial 0x7e02 -days 30 -extfile "$TMP/two-uri.ext" -out "$D/devices/device-045.pem" 2>/dev/null
+mustnot "check: a client certificate with two urn:urmqtt: SAN URIs fails" "$PKI" check "$D"
+[[ $("$PKI" check "$D" 2>&1 || true) == *"more than one urn:urmqtt: SAN URI"* ]] && ok "... for that reason" || bad "check: two URIs not named"
+rm -r "$D/devices"
+must "check: the deploy directory is usable again" "$PKI" check "$D"
 
 # The kernel's own rules, through pack: a server certificate that expires within
 # tls.min_server_cert_days (60) is refused, by `check` too.

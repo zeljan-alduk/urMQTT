@@ -333,27 +333,22 @@ def password_mode():
 
 
 def lockout_mode():
-    # Two failures, a success, two failures: the success clears the count.
+    # Two failures, a success, one more failure: three failures in the window
+    # lock the address out. A success does not clear the count (ADR-363: until
+    # v0.6.0 it did, and this scenario checked that it did; an account holder
+    # could then guess without end between its own logins).
     for pw in ("bad1", "bad2"):
         c, code = login((S1[0], pw))
         assert code == 4, code
         c.close()
     c, code = login(S1)
-    report("success-clears-the-failures", code == 0, f"CONNACK {code}")
+    report("a-login-inside-the-window-works", code == 0, f"CONNACK {code}")
     c.close()
-    for pw in ("bad3", "bad4"):
-        c, code = login((S1[0], pw))
-        assert code == 4, code
-        c.close()
-    c, code = login(S1)
-    report("two-failures-after-a-success-do-not-lock", code == 0, f"CONNACK {code}")
+    # The third failure is judged and locks: the next attempt, even with the
+    # right password, gets no answer at all (the SYN is dropped, no CONNACK).
+    c, code = login((S1[0], "bad3"))
+    assert code == 4, code
     c.close()
-    # Three in a row lock the address out: the next attempt, even with the right
-    # password, gets no answer at all (the SYN is dropped, so there is no CONNACK).
-    for pw in ("bad5", "bad6", "bad7"):
-        c, code = login((S1[0], pw))
-        assert code == 4, code
-        c.close()
     t0 = time.time()
     c, code = login(S1, wait=2.5)
     report("locked-out-address-gets-no-answer", code is None, f"{code!r}")
