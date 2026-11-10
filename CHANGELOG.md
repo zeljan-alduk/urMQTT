@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.6.0] - 2026-11-09
+## [0.6.0] - 2026-11-10
 
 The **production-readiness release**: everything since v0.5.0 (signed with the release key `721316B961DCB94B`, as
 v0.4.2 and v0.5.0 were). Headline features: **IPv6** with SLAAC or static addresses beside IPv4, on every listener

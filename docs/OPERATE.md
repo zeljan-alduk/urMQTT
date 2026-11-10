@@ -199,6 +199,17 @@ address and one limit; a limit the site reaches shows as `per_address/refused`
 and `syn_dropped` growing while that site's devices fail to reconnect. The
 plaintext listener has its own `plaintext.max_connections_per_ip` and is not
 counted here.
+## More than one NIC queue (NEXT-6, ADR-310 to ADR-314)
+
+`devices.virtio_net_queues` is `"auto"` by default: when the virtio-net device offers multiqueue **with**
+receive-side scaling, each data core gets its own queue pair and the device spreads TCP flows over them (the broker
+programs the hash key and the table). On the usual VPS the NIC has one queue, or several without RSS, and the broker
+keeps one pair as before. The boot log says which: `net: N queue pair(s)` or `net: one queue pair: <reason>`; the
+per-queue counters are in the console and in `$SYS`. Set `"one"` (format 19) to force a single queue if a host
+misbehaves; nothing else changes. Status in v0.6.0: tested under QEMU only (a multi-queue tap rig), not under KVM
+with vhost, and no throughput gain has been measured yet, so treat `"auto"` on a new platform as something to watch on
+first boot. How to build a multi-queue QEMU/KVM host is in docs/DEPLOY.md.
+
 ## IPv6 (NEXT-1, ADR-330 to ADR-334)
 
 **Off by default.** With `network.ipv6 = "slaac"` the broker makes its link-local address (`fe80::` and the

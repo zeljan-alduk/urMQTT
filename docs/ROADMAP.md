@@ -302,7 +302,7 @@ release signed with it is v0.4.2.**
 These change what devices can do. Each is larger than the Now items and most add input parsing; sizes assume the
 same test standard as M8 to M16 (codec fuzzing, Kani harnesses, mosquitto interop).
 
-**NEXT-1. IPv6 with SLAAC and static addresses.** L. **Done (v0.6.0, ADR-330 to ADR-334).**
+**NEXT-1. IPv6 with SLAAC and static addresses.** L. **Done in part (v0.6.0, ADR-330 to ADR-334):** SLAAC, static addresses and dual-stack listeners are in; UDP over IPv6 (so SNTP, syslog and statsd to IPv6 servers), fragment reassembly, ICMPv6 errors, DHCPv6 and a real /64 run are not.
 - What: Ethernet type 0x86DD, ICMPv6 with Neighbour Discovery, SLAAC and a static address/prefix, dual stack in
   the per-core `Iface`, TCP and SYN cookies over IPv6, the Toeplitz steering for IPv6 tuples, IPv6 CIDRs in
   `plaintext.allow_from`, SNTP to IPv6 servers.
@@ -374,7 +374,7 @@ same test standard as M8 to M16 (codec fuzzing, Kani harnesses, mosquitto intero
   password inside TLS, origin allowlist, upgrade deadline; fuzz targets `ws_upgrade` and `ws_frames`, Kani, Miri,
   Autobahn|Testsuite (0 failed, docs/audit/ws-autobahn.md), smoke group `websocket` on both architectures.
 
-**NEXT-6. virtio-net multiqueue and RSS.** M. **Done (v0.6.0, ADR-310 to ADR-314).**
+**NEXT-6. virtio-net multiqueue and RSS.** M. **Done in part (v0.6.0, ADR-310 to ADR-314):** built and tested under QEMU; not run under KVM with vhost, and no throughput gain measured yet (the X11 rows must be re-measured).
 - What: one queue pair per data core with the device's RSS, so core 0 stops copying every frame.
 - Why: ADR-032 ("virtio-net multiqueue + RSS is not implemented ... the hash already matches RSS"); README features
   "📋 later (needs tap/vhost to test)".
@@ -383,7 +383,7 @@ same test standard as M8 to M16 (codec fuzzing, Kani harnesses, mosquitto intero
   the X11 rows re-measured.
 - Done (v0.6.0, ADR-310 to ADR-314): one queue pair per data core when the device offers MQ, the control queue and RSS, programmed with the broker's own Toeplitz key and table; one pair otherwise (QEMU's default, most VPSes); `devices.virtio_net_queues = "auto" | "single"` (format 19), per-pair counters, `scripts/mq-rig.sh`, smoke group `mq`, fuzz `virtio_net_mq`. Left: verification on a KVM host (vhost-net with eBPF RSS, interrupts to vCPUs other than 0, the throughput gain; D-9 open: tested under QEMU TCG in Docker only), multiqueue without RSS, HASH_REPORT, IPv6 hash types in the device, a table change at run time; on aarch64 with a GICv3 ITS only (QEMU TCG, the netcup ARM VPS) the worker pairs are polled.
 
-**NEXT-7. An outbound TCP client.** L. **Done (v0.6.0, ADR-315 to ADR-319).**
+**NEXT-7. An outbound TCP client.** L. **Done in part (v0.6.0, ADR-315 to ADR-319):** active open and a TLS 1.3 client with one user (log shipping, IPv4 literals, no client certificate); not tested against an upstream broker, and the export bridge (NEXT-8) and DNS (NEXT-10) are not started.
 - What: active open in `urmqtt-tcp` (today passive open only, ADR-033), with connection state, ISN generation
   without cookies, and a TLS client path.
 - Why: it is the prerequisite of bridging, webhooks, syslog over TLS, NTS and any cluster protocol; PROMPT.md §7.4
@@ -401,7 +401,7 @@ same test standard as M8 to M16 (codec fuzzing, Kani harnesses, mosquitto intero
 - Risk: unbounded queues are the obvious failure; AUDIT.md §6b needs a new row. Dependency: NEXT-7.
 - Verify: an upstream Mosquitto in the smoke rig; a stalled upstream must not grow the heap.
 
-**NEXT-9. Observability beyond statsd and syslog over UDP.** S (exporter) to M (in-kernel). **Done (v0.6.0, ADR-290 to ADR-294).**
+**NEXT-9. Observability beyond statsd and syslog over UDP.** S (exporter) to M (in-kernel). **Done in part (v0.6.0, ADR-290 to ADR-294):** the Prometheus endpoint is in, behind an allow-list; no TLS or authentication on it, and its output is checked against the labels, not against every `$SYS` value.
 - What: either an OpenMetrics/Prometheus exporter outside the image that reads `$SYS` over MQTT or statsd, or an
   in-kernel HTTP endpoint; and TLS for log shipping once NEXT-7 exists.
 - Why: SECURITY.md residual risk "Syslog and statsd are plain UDP"; there is no Prometheus support in the repo.
