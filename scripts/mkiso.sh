@@ -64,6 +64,9 @@
 # slot (marked DISK), so the hash of the image pinned in the menus does not
 # depend on the configuration; the installer copies the booted slot into the
 # installed disk, whose limine.conf lists the module without a hash (ADR-217).
+# --config-slot FILE takes a slot file as it is, unchecked: the slot of an edition built on the kernel library,
+# whose configuration keys the open urmqtt-config does not know (NOW-18, ADR-337); the edition's own packer has
+# checked it (examples/edition: urmqtt-example-config --out-slot).
 #
 # The loaders' configuration is enrolled (H8, ADR-250): `limine enroll-config` writes
 # the blake2b of the exact limine.conf into each loader (BOOTAA64.EFI, BOOTX64.EFI and
@@ -97,6 +100,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 ARCH=${URMQTT_ARCH:-aarch64}
 KERNEL="" OUT="" CMDLINE="" ESP_OUT="" INSTALL_CMDLINE="install" INSTALL_DEFAULT=0
 UNIVERSAL=0 KERNEL_A64="" KERNEL_X86="" DISK_OUT="" LIVE="" DIAG_CMDLINE="diag" DIAG_DEFAULT=0 NO_DIAG=0
+CONFIG_SLOT=""
 CONFIG="" CONFIG_ROOT="" EMPTY_CONFIG=0 ENROLL=1 SB_KEY="" SB_CERT="" SEAL=""
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -120,6 +124,7 @@ while [[ $# -gt 0 ]]; do
         --seal) SEAL=1; shift ;;
         --no-seal) SEAL=0; shift ;;
         --config) CONFIG=$2; shift 2 ;;
+        --config-slot) CONFIG_SLOT=$2; shift 2 ;;
         --config-root) CONFIG_ROOT=$2; shift 2 ;;
         --empty-config) EMPTY_CONFIG=1; shift ;;
         --live) LIVE=1; shift ;;
@@ -175,7 +180,13 @@ blake2b() { python3 -I -c 'import hashlib,sys; print(hashlib.blake2b(open(sys.ar
 # --- the configuration slot -------------------------------------------------
 cfgtool() { (cd "$ROOT" && cargo run -q --locked -p urmqtt-config-tool --bin urmqtt-config -- "$@"); }
 CFG_ENV=${URMQTT_ENV:-dev}
-if [[ $EMPTY_CONFIG -eq 1 ]]; then
+if [[ -n "$CONFIG_SLOT" ]]; then
+    [[ -z "$CONFIG" && $EMPTY_CONFIG -eq 0 ]] || { echo "error: --config-slot excludes --config and --empty-config" >&2; exit 2; }
+    [[ $(wc -c < "$CONFIG_SLOT" | tr -d ' ') -eq 262144 && $(head -c 15 "$CONFIG_SLOT") == URMQTT-CFG-SLOT ]] \
+        || { echo "error: $CONFIG_SLOT is not a 256 KiB configuration slot" >&2; exit 1; }
+    cp "$CONFIG_SLOT" "$TMP/urmqtt.cfg"
+    echo "config: $CONFIG_SLOT (an edition's slot, not checked here)" >&2
+elif [[ $EMPTY_CONFIG -eq 1 ]]; then
     : > "$TMP/empty.toml"
     cfgtool pack "$TMP/empty.toml" --latest-format --out-slot "$TMP/urmqtt.cfg" | sed 's/^/config: empty (template): /' >&2
 elif [[ -n "$CONFIG" && "$CONFIG" != *.toml ]]; then
@@ -196,7 +207,9 @@ fi
 # at rest, the disk key, so who has the ISO has them. One that is built outside CI (GitHub
 # Actions sets CI) has been through this machine's disk, memory and shell history, and is
 # not the reproducible, attested image of a release. Said loudly, every time; not an error.
-SLOT_ENV=$(cfgtool show "$TMP/urmqtt.cfg" 2>/dev/null | sed -n 's/^env: *//p' | head -1)
+# (The open tool cannot read an edition's slot: the environment of the build is taken.)
+SLOT_ENV=""
+[[ -n "$CONFIG_SLOT" ]] || SLOT_ENV=$(cfgtool show "$TMP/urmqtt.cfg" 2>/dev/null | sed -n 's/^env: *//p' | head -1)
 if [[ $EMPTY_CONFIG -eq 0 && ${SLOT_ENV:-$CFG_ENV} != dev && -z ${CI:-} ]]; then
     {
         echo "================================================================================"

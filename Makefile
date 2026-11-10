@@ -95,6 +95,21 @@ build: $(if $(filter dev,$(ENV)),certs) ## Build the kernel ELF (release, LTO, p
 	$(CARGO) build $(CARGO_FLAGS) $(KERNEL_FLAGS) $(KERNEL_FEATURES) --release -p urmqtt-kernel --target $(TARGET)
 	@printf 'kernel: %s (%s bytes)\n' "$(KERNEL_ELF)" "$$(wc -c < $(KERNEL_ELF) | tr -d ' ')"
 
+# The example edition (NOW-18, ADR-335): a second kernel image built from the
+# kernel library in its own Cargo workspace (examples/edition), plus its
+# configuration packer. Same flags as `make build`; the outputs land in this
+# workspace's target directory.
+EDITION_DIR := examples/edition
+EDITION_ELF := target/$(TARGET_DIR)/release/urmqtt-example
+EDITION_TARGET := $(if $(filter x86_64,$(ARCH)),$(CURDIR)/$(TARGET),$(TARGET))
+
+.PHONY: edition-example
+edition-example: $(if $(filter dev,$(ENV)),certs) ## Build the example edition's kernel and packer (examples/edition: the kernel library plus a PCI driver)
+	cd $(EDITION_DIR) && $(CARGO) build $(CARGO_FLAGS) $(KERNEL_FLAGS) $(if $(filter dev,$(ENV)),--features selftest) \
+		--release --bin urmqtt-example --target $(EDITION_TARGET) --target-dir $(CURDIR)/target
+	cd $(EDITION_DIR) && $(CARGO) build $(CARGO_FLAGS) --bin urmqtt-example-config --target-dir $(CURDIR)/target
+	@printf 'kernel: %s (%s bytes)\n' "$(EDITION_ELF)" "$$(wc -c < $(EDITION_ELF) | tr -d ' ')"
+
 .PHONY: iso
 iso: build ## Build the bootable UEFI ISO for deploy/<ENV>/
 	scripts/mkiso.sh --kernel $(KERNEL_ELF) --out $(ISO)
