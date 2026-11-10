@@ -736,3 +736,118 @@ fn an_in_place_update_keeps_the_slot_a_way_back() {
     );
     assert!(status(&d).contains("v0.6.2 (store schema 5): confirmed"));
 }
+
+/// BOOT-3 (security review v0.6.0, ADR-368): `update-boot --in-place` on an A/B disk applied none
+/// of the rules of `slots stage` (an older release, a kernel whose store schema is older than the
+/// store, a configuration format the kernel cannot read, a kernel without a build note) and then
+/// resealed the slot as a confirmed way back. It applies them now.
+#[test]
+fn an_in_place_update_keeps_the_downgrade_rules() {
+    let d = ab_disk(
+        "in-place-rules.img",
+        &esp(Some("v0.6.0"), 5, 17, &config_slot(true), 0),
+    );
+    let try_esp = |name: &str, e: Vec<u8>| write(&format!("in-place-rules-{name}.esp"), &e);
+    let older = try_esp("v0.5.9", esp(Some("v0.5.9"), 4, 13, &config_slot(false), 9));
+    // slots stage refuses it, and so does update-boot --in-place, with the same words.
+    refused(
+        &[
+            "slots",
+            "stage",
+            s(&d),
+            "--esp",
+            s(&older),
+            "--unsigned",
+            "--write",
+        ],
+        "reads formats up to 13",
+    );
+    refused(
+        &[
+            "update-boot",
+            s(&d),
+            "--esp",
+            s(&older),
+            "--in-place",
+            "--write",
+        ],
+        "reads formats up to 13",
+    );
+    // An older store schema is never allowed.
+    let schema4 = try_esp(
+        "schema4",
+        esp(Some("v0.6.1"), 4, 17, &config_slot(false), 4),
+    );
+    refused(
+        &[
+            "update-boot",
+            s(&d),
+            "--esp",
+            s(&schema4),
+            "--in-place",
+            "--allow-downgrade",
+            "--write",
+        ],
+        "it would refuse the store",
+    );
+    // An older release needs --allow-downgrade.
+    let v059 = try_esp(
+        "v0.5.9b",
+        esp(Some("v0.5.9"), 5, 17, &config_slot(false), 5),
+    );
+    refused(
+        &[
+            "update-boot",
+            s(&d),
+            "--esp",
+            s(&v059),
+            "--in-place",
+            "--write",
+        ],
+        "is older than the running v0.6.0",
+    );
+    // A kernel without a build note is no way back on an A/B disk.
+    let bare = try_esp("bare", esp(None, 5, 17, &config_slot(false), 6));
+    refused(
+        &[
+            "update-boot",
+            s(&d),
+            "--esp",
+            s(&bare),
+            "--in-place",
+            "--write",
+        ],
+        "carry no build note",
+    );
+    // Nothing of that changed the disk.
+    assert!(status(&d).contains("v0.6.0 (store schema 5): confirmed"));
+    let t = ok(&[
+        "update-boot",
+        s(&d),
+        "--esp",
+        s(&v059),
+        "--in-place",
+        "--allow-downgrade",
+        "--write",
+    ]);
+    assert!(t.contains("downgrade from v0.6.0 to v0.5.9 allowed"), "{t}");
+    assert!(status(&d).contains("v0.5.9 (store schema 5): confirmed"));
+}
+
+/// The configuration tool reads the kernels' build note (ADR-367) the way
+/// the store's decoder does.
+#[test]
+fn the_config_tool_reads_the_build_note_like_the_store() {
+    let e = esp(Some("v0.6.0"), 5, 17, &config_slot(false), 0);
+    assert_eq!(urmqtt_config_tool::image::notes_cfg_format(&e), Some(17));
+    assert_eq!(slots::find_notes(&e)[0].cfg_format, 17);
+    let none = esp(None, 5, 17, &config_slot(false), 0);
+    assert_eq!(urmqtt_config_tool::image::notes_cfg_format(&none), None);
+    assert!(slots::find_notes(&none).is_empty());
+    // A broken note (reserved bytes set) is no note for either.
+    let mut bad = e.clone();
+    bad[2 * MIB + 27] = 1;
+    bad[3 * MIB + 27] = 1;
+    assert_eq!(urmqtt_config_tool::image::notes_cfg_format(&bad), None);
+    assert!(slots::find_notes(&bad).is_empty());
+}

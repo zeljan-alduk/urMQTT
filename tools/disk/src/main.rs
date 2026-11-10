@@ -15,12 +15,13 @@
 //!                                                on a larger disk, optionally configured; the first
 //!                                                boot formats the data
 //! urmqtt-disk update-boot DISK --esp ESP --write [--config BLOB|SLOT | --keep-config | --replace-config]
-//!                    [--allow-unsealed]
+//!                    [--allow-unsealed] [--in-place] [--allow-downgrade]
 //!                                                replace the kernel (ESP), keep the data. The disk's
 //!                                                configuration slot (C1c) is kept whenever it holds a
 //!                                                real configuration (the default, whatever the new ESP
 //!                                                carries); --config sets one, --replace-config takes
-//!                                                the new ESP's own
+//!                                                the new ESP's own. A kernel with a build note is held
+//!                                                to the rules of `slots stage` (ADR-368)
 //! urmqtt-disk slots status DISK                  the two boot slots of an A/B disk (v0.6.0, NEXT-11):
 //!                                                region, release, state, the disk GUID the control
 //!                                                messages name
@@ -682,13 +683,16 @@ fn update_boot(
     write: bool,
     in_place: bool,
     allow_unsealed: bool,
+    allow_downgrade: bool,
     policy: &config::Policy,
 ) -> Result<(), String> {
     let esp = std::fs::read(esp).map_err(|e| format!("{esp}: {e}"))?;
+    let db_schema = disk_store_schema(path);
     let mut dev = FileDisk::open(path, write)?;
     // An A/B disk (ADR-299): the running slot would be overwritten in place,
     // with no way back if the new kernel fails.
     let ab = matches!(slots::read(&mut dev), Ok(Some(_)));
+    let mut running: Option<slots::Slot> = None;
     if let Ok(Some(s)) = slots::read(&mut dev) {
         if !in_place {
             return Err(format!(
@@ -699,6 +703,7 @@ fn update_boot(
         if s.active().state.trial {
             return Err(ab::slot_error(&slots::SlotError::TrialPending));
         }
+        running = Some(s.active());
     }
     let f = inspect(&mut dev)?;
     let t = f.primary.as_ref().ok_or("no valid primary GPT")?;
@@ -721,6 +726,57 @@ fn update_boot(
     if let Some(w) = config::keep_sealed(&old, &esp, allow_unsealed)? {
         eprintln!("update-boot: {w}");
     }
+    // ADR-368: the rules of `slots stage`, here too. The kernels' build note
+    // says what they are; the configuration must be one they read, the store
+    // one they can open, and an older release needs --allow-downgrade. On an
+    // A/B disk a kernel without a note is refused (the slot would record it as
+    // a way back it is not); on a disk with one slot, a kernel before v0.6.0
+    // has none and is judged by nothing (as before).
+    let note = if ab {
+        Some(
+            ab::note_of(&esp)
+                .map_err(|e| format!("--in-place on a disk with two boot slots: {e}"))?,
+        )
+    } else {
+        slots::find_notes(&esp).into_iter().next()
+    };
+    if let Some(n) = &note {
+        if let Some(fmt) = ab::config_format(&esp)
+            && fmt > n.cfg_format
+        {
+            return Err(format!(
+                "the configuration is format {fmt}, this kernel reads formats up to {}: it would refuse it at boot",
+                n.cfg_format
+            ));
+        }
+        let warn = match &running {
+            Some(a) => ab::rules(n, a, db_schema, allow_downgrade)?,
+            // One slot: the running kernel is known by its own note, if it
+            // has one (v0.6.0 and later); else only the store is judged.
+            None => match slots::find_notes(&old).into_iter().next() {
+                Some(was) => ab::rules_for(
+                    n,
+                    &was.version,
+                    was.schema,
+                    "the running kernel's store schema",
+                    db_schema,
+                    allow_downgrade,
+                )?,
+                None => match db_schema {
+                    Some(store) if n.schema < store => {
+                        return Err(format!(
+                            "this kernel writes store schema {} but the store on the disk is schema {store}: it would refuse the store (a store migration is one-way, docs/DISK-FORMAT.md §5.1.1). Never allowed",
+                            n.schema
+                        ));
+                    }
+                    _ => Vec::new(),
+                },
+            },
+        };
+        for w in warn {
+            println!("update-boot: warning: {w}");
+        }
+    }
     println!(
         "update-boot: {}\nupdate-boot: before: {}\nupdate-boot: after:  {}\nupdate-boot: {}",
         what,
@@ -736,7 +792,6 @@ fn update_boot(
         );
         return Ok(());
     }
-    let note = slots::find_notes(&esp).into_iter().next();
     dev.write(e.first_lba, &esp)
         .map_err(|e| format!("write: {e:?}"))?;
     dev.flush().map_err(|e| format!("flush: {e:?}"))?;
@@ -1863,6 +1918,7 @@ fn run(args: &[String]) -> Result<(), String> {
             flag("--write"),
             flag("--in-place"),
             flag("--allow-unsealed"),
+            flag("--allow-downgrade"),
             &policy()?,
         ),
         Some("migrate") => migrate_cmd(

@@ -17,6 +17,14 @@
 //!    claims is not trusted, so the signed `SHA256SUMS` of an older release
 //!    cannot be passed off as a newer one (security review of v0.6.0,
 //!    SUPPLY-2, ADR-381).
+
+//!    the release workflow since v0.1.0) must name `tag`: an older release,
+//!    genuinely signed, is not accepted under a newer tag (ADR-365).
+//!
+//! `urmqtt-config check-release --pubkey` and `urmqtt-disk slots stage
+//! --pubkey` have no tag; [`check_builtin`] applies these rules there, with the
+//! tag of the trusted comment, to every key of the ring built into the tool
+//! (ADR-366).
 //!
 //! The ring is parsed by a small strict JSON reader (this crate has no JSON
 //! dependency, and the ring is the trust anchor: anything unexpected is an error).
@@ -317,6 +325,11 @@ pub fn verify(keys: &[RingKey], tag: &str, sums: &[u8], sig: &str) -> Result<Rin
         return Err(format!(
             "the signature is for {}, not {tag} (trusted comment {comment:?}): a signed release under another tag",
             comment_tag(comment).unwrap_or("no release tag")
+
+    let comment = &signed.signature.trusted_comment;
+    if !same_tag(comment_tag(comment), tag) {
+        return Err(format!(
+            "SHA256SUMS signed with {what} is the release \"{comment}\", not {tag}: a signed file of one release is never accepted as another (ADR-365)"
         ));
     }
     Ok(RingVerified {
@@ -324,6 +337,54 @@ pub fn verify(keys: &[RingKey], tag: &str, sums: &[u8], sig: &str) -> Result<Rin
         key: key.clone(),
         pinned,
     })
+}
+
+/// The tag a trusted comment names (`urMQTT v0.6.0 release <commit>`), or "".
+pub fn comment_tag(comment: &str) -> &str {
+    comment
+        .strip_prefix("urMQTT ")
+        .and_then(|r| r.split(' ').next())
+        .unwrap_or("")
+}
+
+/// `v0.6.0` and `0.6.0` are the same tag; anything else must be equal.
+fn same_tag(a: &str, b: &str) -> bool {
+    !a.is_empty() && a.strip_prefix('v').unwrap_or(a) == b.strip_prefix('v').unwrap_or(b)
+}
+
+/// The key ring of the repository, built into the tool (with the key files it
+/// names). An error when it does not parse (a release key that is still the
+/// placeholder): the checks that need it then refuse (fail closed).
+pub fn builtin() -> Result<Vec<RingKey>, String> {
+    const RING: &str = include_str!("../../../keys/release-keys.json");
+    const RELEASE: &str = include_str!("../../../minisign.pub");
+    const TEST: &str = include_str!("../../../keys/minisign-test-9229E05252D01F8E.pub");
+    parse(RING, &mut |f| match f {
+        "../minisign.pub" => Ok(RELEASE.to_owned()),
+        "minisign-test-9229E05252D01F8E.pub" => Ok(TEST.to_owned()),
+        _ => Err(format!("{f} is not built in")),
+    })
+    .map_err(|e| format!("the key ring built into this tool: {e}"))
+}
+
+/// For a check without a tag (`--pubkey`): when the key that made `sig` is in
+/// `ring`, the ring's rules apply with the tag the signed trusted comment
+/// names, so the former test key signs only its pinned releases however it is
+/// passed (ADR-366). A key that is not in `ring` (an operator's own) is not
+/// restricted.
+pub fn check_untagged(ring: &[RingKey], sums: &[u8], sig: &str) -> Result<(), String> {
+    let id = minisign::signature_key_id(sig)?;
+    let Some(key) = ring.iter().find(|k| k.public.key_id() == id) else {
+        return Ok(());
+    };
+    let signed = release::verify_sums(&key.text, sums, sig)?;
+    let tag = comment_tag(&signed.signature.trusted_comment).to_owned();
+    verify(ring, &tag, sums, sig).map(|_| ())
+}
+
+/// [`check_untagged`] with the ring built into the tool.
+pub fn check_builtin(sums: &[u8], sig: &str) -> Result<(), String> {
+    check_untagged(&builtin()?, sums, sig)
 }
 
 /// A small strict JSON reader: objects, arrays, strings (with escapes),

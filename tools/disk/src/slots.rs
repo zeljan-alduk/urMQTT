@@ -188,15 +188,34 @@ pub fn rules(
     db_schema: Option<u32>,
     allow_downgrade: bool,
 ) -> Result<Vec<String>, String> {
+    rules_for(
+        note,
+        &active.label,
+        u32::from(active.state.schema),
+        "the active slot's recorded schema",
+        db_schema,
+        allow_downgrade,
+    )
+}
+
+/// [`rules`] against a running kernel known by its label and store schema
+/// (`what_schema` says where that schema comes from, for the warning).
+pub fn rules_for(
+    note: &Note,
+    running: &str,
+    running_schema: u32,
+    what_schema: &str,
+    db_schema: Option<u32>,
+    allow_downgrade: bool,
+) -> Result<Vec<String>, String> {
     let mut warn = Vec::new();
     let store = match db_schema {
         Some(s) => s,
         None => {
             warn.push(format!(
-                "the store could not be read (encrypted without --key, or newer than this tool): judging by the active slot's recorded schema {}",
-                active.state.schema
+                "the store could not be read (encrypted without --key, or newer than this tool): judging by {what_schema} {running_schema}"
             ));
-            u32::from(active.state.schema)
+            running_schema
         }
     };
     if note.schema < store {
@@ -205,21 +224,21 @@ pub fn rules(
             note.schema
         ));
     }
-    match older(&note.version, &active.label) {
+    match older(&note.version, running) {
         Some(true) if !allow_downgrade => {
             return Err(format!(
                 "{} is older than the running {}: refused (rollback protection, AUDIT H8-W6); add --allow-downgrade if that is what you want",
-                note.version, active.label
+                note.version, running
             ));
         }
         Some(true) => warn.push(format!(
             "downgrade from {} to {} allowed by --allow-downgrade",
-            active.label, note.version
+            running, note.version
         )),
         Some(false) => {}
         None => warn.push(format!(
             "cannot compare {:?} with {:?} (not release versions): no downgrade check",
-            note.version, active.label
+            note.version, running
         )),
     }
     Ok(warn)
