@@ -4010,7 +4010,7 @@ edition() {
         local log data status
         log="$OUT/edition-ext-$accel.log" data="$OUT/edition-ext-$accel.img" status=0
         fresh_disk "$OUT/edition-ext.raw" "$data"
-        boot "$log" --disk "$data" --accel "$accel" --headless -- "${edu[@]}" || status=$?
+        boot "$log" --disk "$data" --accel "$accel" --headless --fwd none -- "${edu[@]}" || status=$?
         check "edition: the example image binds edu by its PCI ID, reads a reserved key, runs its hooks [$accel]" \
             "$log" "$status" \
             "edition: example: 1 PCI driver\(s\), 2 configuration key\(s\), hooks: early devices ready tick" \
@@ -4024,21 +4024,21 @@ edition() {
             "^URMQTT READY$" "NOT:virtio: .*: failed" "$NO_FAULT"
         log="$OUT/edition-off-$accel.log" data="$OUT/edition-off-$accel.img" status=0
         fresh_disk "$OUT/edition-off.raw" "$data"
-        boot "$log" --disk "$data" --accel "$accel" --headless -- -device edu || status=$?
+        boot "$log" --disk "$data" --accel "$accel" --headless --fwd none -- -device edu || status=$?
         check "edition: a driver that refuses is reported, the boot goes on [$accel]" "$log" "$status" \
             "example: early hook: ext.example.edu_check = 0x5a5a5a5a, ext.example.edu = \"off\"" \
             "WARN  ext: example-edu at [0-9a-f:.]+: failed: ext.example.edu = \"off\"" \
             "example: devices hook: 0 edu device\(s\) driven" "^URMQTT READY$" "$NO_FAULT"
         log="$OUT/edition-plain-$accel.log" data="$OUT/edition-plain-$accel.img" status=0
         fresh_disk "$OUT/edition-plain.raw" "$data"
-        boot "$log" --disk "$data" --accel "$accel" --headless || status=$?
+        boot "$log" --disk "$data" --accel "$accel" --headless --fwd none || status=$?
         check "edition: no edu device, no configuration of the edition: the defaults [$accel]" "$log" "$status" \
             "example: early hook: ext.example.edu_check = 0x5a5a5a5a, ext.example.edu = \"auto\"" \
             "example: devices hook: 0 edu device\(s\) driven" "NOT:ext: example-edu" "^URMQTT READY$" "$NO_FAULT"
         # The open image: the same devices are listed and left alone, nothing of an edition is logged.
         log="$OUT/edition-open-$accel.log" data="$OUT/edition-open-$accel.img" status=0
         fresh_disk "$OUT/edition-open.raw" "$data"
-        boot "$log" --disk "$data" --accel "$accel" --headless -- "${edu[@]}" || status=$?
+        boot "$log" --disk "$data" --accel "$accel" --headless --fwd none -- "${edu[@]}" || status=$?
         check "edition: the open image lists the edu devices and drives none, as before [$accel]" "$log" "$status" \
             "pci [0-9a-f:.]+ 1234:11e8 class 00\.ff" "NOT:edition:" "NOT:ext: " "NOT:example" \
             "^URMQTT READY$" "$NO_FAULT"
