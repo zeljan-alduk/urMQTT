@@ -6,6 +6,7 @@
 #                       [--data IMG] [--bus blk|scsi] [--cpu MODEL] [--gic 3|2] [--no-rng] [--acpi on|off] [--serial FILE]
 #                       [--serial-in SOCKET] [--headless]
 #                       [--pcap FILE] [--gdb] [--no-net] [--fwd HOST:GUEST,...]
+#                       [--net6 dual|only]
 #                       [--blk-props 'physical_block_size=4096,opt_io_size=65536,...']
 #                       [--disk-format raw|qcow2] [--discard unmap]
 #                       [--dgram LOCAL:REMOTE] [--tap IFNAME[:QUEUES]] [--gpu virtio|virtio-vga] [--iommu intel|amd|smmuv3] [-- extra qemu args]
@@ -23,6 +24,10 @@
 # the Raspberry Pi 4 and 5 (at most 8 CPUs).
 # --fwd replaces the default port forwards (1883 and 8883 on 127.0.0.1);
 # --fwd none disables them.
+# --net6 dual|only (NEXT-1) gives QEMU's user network IPv6 (prefix fec0::/64, router
+# fe80::2, Router Advertisements): dual keeps IPv4 (10.0.2.0/24), only turns it off.
+# QEMU's host forwards are IPv4 only (it refuses an IPv6 host or guest address), so
+# a host client reaches the guest over IPv6 through --dgram and scripts/ipv6-relay.py.
 # --dgram LOCAL:REMOTE replaces user networking with a raw L2 datagram
 # socket (QEMU binds UDP LOCAL, sends to REMOTE): a host process is then the
 # whole network and can inject arbitrary frames (H3 adversarial tests).
@@ -65,6 +70,16 @@ BLKPROPS=""
 DISKFMT=raw DRIVEOPTS=""
 ISO="" DISK="" BUS=blk CPU_MODEL="" GIC=3 RNG=1 ACCEL="" SMP=4 MEM=512M DATA="" ACPI=on SERIAL="" HEADLESS=0 PCAP="" GDB=0 NET=1
 FWD="1883:1883,8883:8883"
+NET6=""
+# The user network's IPv6 options for --net6 (NEXT-1).
+user_net6() {
+    case $NET6 in
+        "") return 0 ;;
+        dual) printf ',ipv4=on,ipv6=on' ;;
+        only) printf ',ipv4=off,ipv6=on' ;;
+        *) echo "run-qemu.sh: --net6 dual|only" >&2; exit 2 ;;
+    esac
+}
 DGRAM=""
 TAP=""
 SECURE_VARS=""
@@ -99,6 +114,7 @@ while [[ $# -gt 0 ]]; do
         --gdb) GDB=1; shift ;;
         --no-net) NET=0; shift ;;
         --fwd) FWD=$2; shift 2 ;;
+        --net6) NET6=$2; shift 2 ;;
         --dgram) DGRAM=$2; shift 2 ;;
         --tap) TAP=$2; shift 2 ;;
         --gpu) GPU=$2; shift 2 ;;
@@ -237,12 +253,13 @@ if [[ $ARCH == x86_64 ]]; then
             NETDEV+=",remote.type=inet,remote.host=127.0.0.1,remote.port=${DGRAM##*:}"
         else
             NETDEV="user,id=n0"
-            if [[ "$FWD" != none ]]; then
+            if [[ "$FWD" != none && "$NET6" != only ]]; then
                 IFS=, read -r -a pairs <<< "$FWD"
                 for p in "${pairs[@]}"; do
                     NETDEV+=",hostfwd=tcp:127.0.0.1:${p%%:*}-:${p##*:}"
                 done
             fi
+            NETDEV+=$(user_net6)
         fi
         X86ARGS+=(-netdev "$NETDEV" -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=$MQPROPS${QEMU_NIC_PROPS:+,$QEMU_NIC_PROPS}")
         [[ -n "$PCAP" ]] && X86ARGS+=(-object "filter-dump,id=dump0,netdev=n0,file=$PCAP")
@@ -362,12 +379,13 @@ if [[ $NET -eq 1 ]]; then
         NETDEV+=",remote.type=inet,remote.host=127.0.0.1,remote.port=${DGRAM##*:}"
     else
         NETDEV="user,id=n0"
-        if [[ "$FWD" != none ]]; then
+        if [[ "$FWD" != none && "$NET6" != only ]]; then
             IFS=, read -r -a pairs <<< "$FWD"
             for p in "${pairs[@]}"; do
                 NETDEV+=",hostfwd=tcp:127.0.0.1:${p%%:*}-:${p##*:}"
             done
         fi
+        NETDEV+=$(user_net6)
     fi
     ARGS+=(-netdev "$NETDEV" -device "virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56,romfile=$MQPROPS${QEMU_NIC_PROPS:+,$QEMU_NIC_PROPS}")
     [[ -n "$PCAP" ]] && ARGS+=(-object "filter-dump,id=dump0,netdev=n0,file=$PCAP")

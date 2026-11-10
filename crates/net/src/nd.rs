@@ -196,6 +196,9 @@ pub struct Host6 {
     nd_tokens: u32,
     nd_since: u64,
     mld_due: bool,
+    /// Events beyond the first of one message (an RA can bring a router, an
+    /// MTU and a prefix at once), handed out by [`Host6::poll`]; bounded.
+    queued: alloc::collections::VecDeque<Event6>,
     buf: Vec<u8>,
     pub stats: Stats6,
 }
@@ -230,6 +233,7 @@ impl Host6 {
             nd_tokens: ND_PER_SEC,
             nd_since: 0,
             mld_due: false,
+            queued: alloc::collections::VecDeque::new(),
             buf: Vec::with_capacity(256),
             stats: Stats6::default(),
         }
@@ -651,7 +655,7 @@ impl Host6 {
             return None;
         }
         self.ra_seen = true;
-        let mut ev = None;
+        let mut ev: Vec<Event6> = Vec::new();
         if let Some(m) = ra.slla {
             self.learn(&ip.src, m, now);
         }
@@ -661,14 +665,14 @@ impl Host6 {
             self.router = Some((ip.src, until(now, u32::from(ra.router_lifetime_s))));
             if changed {
                 self.router_mac = None;
-                ev = Some(Event6::Router {
+                ev.push(Event6::Router {
                     addr: ip.src,
                     lifetime_s: ra.router_lifetime_s,
                 });
             }
         } else if self.router.map(|r| r.0) == Some(ip.src) {
             self.router = None;
-            ev = Some(Event6::RouterGone { addr: ip.src });
+            ev.push(Event6::RouterGone { addr: ip.src });
         }
         // The MTU (RFC 4861 §6.3.4: from 1280 to the link's).
         if let Some(m) = ra.mtu
@@ -677,17 +681,26 @@ impl Host6 {
             && m as u16 != self.mtu
         {
             self.mtu = m as u16;
-            ev = ev.or(Some(Event6::Mtu { mtu: self.mtu }));
+            ev.push(Event6::Mtu { mtu: self.mtu });
         }
         for p in ra.prefixes() {
             if let Some(e) = self.on_prefix(now, p) {
-                ev = ev.or(Some(e));
+                ev.push(e);
             }
         }
         if ra.prefixes_dropped > 0 {
             self.stats.prefixes_ignored += u64::from(ra.prefixes_dropped);
         }
-        ev
+        let mut it = ev.into_iter();
+        let first = it.next();
+        for e in it {
+            // At most MAX_PREFIXES + 2 per RA; a flood of RAs is bounded by
+            // the queue's cap.
+            if self.queued.len() < 32 {
+                self.queued.push_back(e);
+            }
+        }
+        first
     }
 
     fn on_prefix(&mut self, now: u64, p: &ipv6::PrefixInfo) -> Option<Event6> {
@@ -749,6 +762,9 @@ impl Host6 {
     pub fn poll(&mut self, now: u64, out: &mut impl FnMut(&[u8])) -> Option<Event6> {
         if !self.owner || self.mode.is_none() {
             return None;
+        }
+        if let Some(e) = self.queued.pop_front() {
+            return Some(e);
         }
         if self.mld_due {
             self.mld_due = false;
@@ -971,6 +987,11 @@ mod tests {
             })
         );
         assert_eq!(h.mtu(), 1480);
+        // The MTU's event comes from the next poll.
+        assert_eq!(
+            h.poll(2000, &mut |f| out.push(f.to_vec())),
+            Some(Event6::Mtu { mtu: 1480 })
+        );
         let want = with_iid(&PFX, eui64(MAC));
         assert_eq!(h.global_slot().unwrap().addr, want);
         // Not usable until DAD ends.
