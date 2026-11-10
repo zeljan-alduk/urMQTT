@@ -623,7 +623,8 @@ serials, 8 CA files per role, 4 NTP servers; the slot holds 256 KiB in all.
 | `tls.revocation_list` | file name or `""` | Revoked client-certificate serials (hex, one per line); runtime revocations come on top (H1) |
 | `limits.max_connections_per_core` | > 0 | Admission limit per core |
 | `limits.max_packet_size` | 64 – 268 435 455 | Largest accepted MQTT packet |
-| `limits.max_topic_len`, `max_topic_levels` | ≤ 65 535, > 0 | Topic bounds, checked before any allocation |
+| `limits.max_topic_len` | ≤ 65 535, > 0 | Topic bound, checked before any allocation |
+| `limits.max_topic_levels` | 1 – 128 (16) | Levels in a topic or filter, checked before any allocation; the topic tree's walks recurse once per level, so the cap keeps them well inside a data core's stack (ADR-346) |
 | `limits.max_subscriptions_per_session` | > 0 | |
 | `limits.max_inflight_qos1` | > 0 | Unacknowledged QoS 1 and QoS 2 deliveries per session (a QoS 2 one until its PUBCOMP); also the QoS 2 ids a client may hold awaiting PUBREL, at least 64 (ADR-271) |
 | `limits.max_queued_per_offline_session` | ≥ 0 | Bounded offline queue |

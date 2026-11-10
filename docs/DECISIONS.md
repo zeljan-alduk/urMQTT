@@ -5561,3 +5561,63 @@ device the kernel does not drive is unaffected; one for a driven device would be
      edition's slot that holds an `[ext]` key; an edition reconfigures its image by rebuilding it with its own
      packer and `mkiso.sh --config-slot`.
   5. **The private repository itself** (`urmqtt-enterprise`) is not created and nothing is published.
+
+## ADR-345 — Device addresses: the MSI-X table inside its BAR, no device mapping over RAM (security review of v0.6.0)
+
+- **Status:** Accepted (v0.6.1; security review of v0.6.0, memory safety lens, finding UNSAFE-1, medium).
+- **Context.** `setup_msix_queues` mapped `BAR base + table_offset` for `table_size * 16` bytes as device memory
+  and wrote MSI-X entries there (entry 0 for every MSI-X device; entries 1.. for the NIC, at probe and again in
+  `route_net_queue`). Offset (up to 0xFFFF_FFF8) and size (up to 2048 entries) are the device's MSI-X capability,
+  and nothing checked them against the BAR, unlike the virtio structures (`region` checks offset + length against
+  the probed BAR size). `memory::map_mmio` mapped any physical address. On QEMU q35 and aarch64 `virt` the kernel's
+  RAM lies within 4 GiB above the 32-bit BAR window, so a hostile device (bare metal, or a device model less
+  trusted than the hypervisor) could have the kernel overwrite RAM with MSI address/data words: memory corruption
+  by the CPU, which the IOMMU of `devices.iommu = "require"` does not see. The values are the kernel's, so it is a
+  crash or damaged state, not a chosen write.
+- **Decision.** `pci::msix_table` returns the table's physical range only when its BAR is an assigned memory BAR
+  and `table_offset + table_size * 16 <= bar_size` (probed, with overflow checked); otherwise the device gets no
+  MSI-X (`Why::TableUnmapped`, the boot line says so) and is polled, as with any other MSI-X setup failure. As a
+  second line, `memory::map_mmio` refuses any range that overlaps a RAM-like entry of the memory map (usable,
+  bootloader-reclaimable, kernel and modules, ACPI-reclaimable), which also covers a BAR base the device or
+  firmware set inside RAM, for every caller (virtio structures, an edition's BAR, the interrupt controllers, the
+  IOMMU registers, the HPET); length overflow is refused too.
+- **Not changed.** The MSI-X pending-bit array is still not mapped (the kernel never reads it).
+- **Verified.** Host test `pci` `msix_table_outside_its_bar_is_refused` (valid tables accepted, an offset past
+  the BAR, the largest offset, a table running off the end, the largest table in a small BAR, an unassigned BAR and
+  an I/O BAR refused; BARs and the command register restored). QEMU smoke runs (below in the release notes) boot
+  with MSI-X on virtio-net, virtio-blk and the IOMMU groups unchanged.
+
+## ADR-346 — `limits.max_topic_levels` is capped at 128 (security review of v0.6.0)
+
+- **Status:** Accepted (v0.6.1; security review of v0.6.0, memory safety lens, finding UNSAFE-2, low).
+- **Context.** The topic tree's walks (`collect` under `subscribers`, `walk_retained`, `all_below`) recurse once
+  per topic level, and the literal-child call is not a tail call. `limits.max_topic_levels` accepted 1..=u32::MAX
+  (README said at most 65 535) and the kernel converted it with `as u16`, so 65 536 became 0 (every topic refused)
+  and 65 537 became 1. With it and `limits.max_topic_len` raised, one device could publish a retained message (or
+  subscribe) some 800+ levels deep and overflow a data core's 128 KiB stack: the guard page makes that a fatal
+  fault, which stops the broker. The default (16) was never at risk.
+- **Decision.** The binary configuration field and `urmqtt-config-schema` accept 1..=128 (`MAX_TOPIC_LEVELS` in
+  both, a test keeps them equal). The kernel converts every `u32` limit it hands the MQTT codec as `u16` with
+  saturation (`limit16`), not truncation; this also fixes `max_subscriptions_per_session` above 65 535 becoming a
+  `max_topics_per_packet` of 0. The configuration format number is unchanged: a blob or TOML with a value above
+  128 is now refused at validation, as any out-of-range value is. The walks stay recursive: at 128 levels they use
+  a small, fixed part of the stack.
+- **Verified.** Host tests `cfg` `topic_levels_are_capped`, `config-schema` `topic_levels_are_capped` (129, 1000,
+  65 536 and u32::MAX refused, 128 accepted, both caps equal) and `broker` `topic_depth_stack`
+  (`deepest_allowed_topic_fits_a_data_core_stack`: subscribers, a literal, `#`, `a/#` and an all-`+` retained walk
+  at 128 levels on a 128 KiB thread in the unoptimised build; the same test at 4 000 levels overflows).
+
+## ADR-347 — The IOMMU drivers reach only the frames lent to them (security review of v0.6.0)
+
+- **Status:** Accepted (v0.6.1; security review of v0.6.0, memory safety lens, finding UNSAFE-3, low, hardening).
+- **Context.** `urmqtt-iommu` has no `unsafe`: it reads and writes its tables through `Env::read`/`Env::write` by
+  physical address, and the kernel's `KEnv::va` turned any 8-byte-aligned address into an HHDM pointer. The `Env`
+  contract (only memory from `Env::alloc`) was documentation; nothing enforced it, so a logic bug in the safe crate
+  would have been an arbitrary kernel write. No such bug was found (ring indices masked, IDs checked against table
+  sizes, walks follow only entries the kernel wrote), and no attacker reaches the path.
+- **Decision.** Each unit's `KEnv` records the frames its `alloc` handed out (`OwnedFrames`: disjoint sorted
+  ranges, binary search) and `va` refuses a doubleword outside them: a read gives 0, a write is dropped, as for a
+  misaligned address. A frame the bookkeeping cannot record is not handed out. `flush` (a cache clean, no write)
+  is unchanged.
+- **Verified.** Host test `kernel` `owned_frames::tests::only_lent_frames_are_reachable`; the `iommu` smoke group,
+  where every table of VT-d, AMD-Vi and SMMUv3 goes through `KEnv`.

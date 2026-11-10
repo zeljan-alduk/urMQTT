@@ -281,6 +281,27 @@ fn topic_len_must_fit_in_packet() {
     assert_rejected("dev", &text, "smaller than limits.max_packet_size");
 }
 
+/// ADR-346: the topic-tree walks recurse once per topic level on a data
+/// core's 128 KiB stack. `limits.max_topic_levels` used to accept any u32,
+/// and the kernel truncated it with `as u16` (65 536 became 0); now it is
+/// capped at 128, the same bound as the binary configuration's field.
+#[test]
+fn topic_levels_are_capped() {
+    for v in [129u64, 1000, 65_536, 4_294_967_295] {
+        assert_rejected(
+            "dev",
+            &dev_with("max_topic_levels", &format!("max_topic_levels = {v}")),
+            "limits.max_topic_levels",
+        );
+    }
+    let ok = dev_with("max_topic_levels", "max_topic_levels = 128");
+    assert!(messages(parse("dev", &ok)).is_empty(), "128 is accepted");
+    assert_eq!(
+        u64::from(MAX_TOPIC_LEVELS),
+        urmqtt_cfg::fields::MAX_TOPIC_LEVELS
+    );
+}
+
 #[test]
 fn zero_limits_rejected() {
     assert_rejected(

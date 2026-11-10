@@ -384,16 +384,23 @@ impl DbLink {
     }
 }
 
+/// A configured `u32` limit as the `u16` the MQTT codec takes, saturating:
+/// `as u16` turned 65 536 into 0 (every topic refused) and 65 537 into 1
+/// (ADR-346).
+pub(crate) fn limit16(v: u32) -> u16 {
+    u16::try_from(v).unwrap_or(u16::MAX)
+}
+
 pub fn broker_config(max_connections: usize, fanout: bool) -> Config {
     let l = CONFIG.limits;
     Config {
         limits: Limits {
             max_packet_size: l.max_packet_size,
-            max_topic_len: l.max_topic_len as u16,
-            max_topic_levels: l.max_topic_levels as u16,
+            max_topic_len: limit16(l.max_topic_len),
+            max_topic_levels: limit16(l.max_topic_levels),
             // Identities become topic levels, so the topic bound applies.
-            max_client_id_len: l.max_topic_len as u16,
-            max_topics_per_packet: l.max_subscriptions_per_session as u16,
+            max_client_id_len: limit16(l.max_topic_len),
+            max_topics_per_packet: limit16(l.max_subscriptions_per_session),
         },
         max_connections: max_connections.min(l.max_connections_per_core as usize),
         max_subscriptions_per_session: l.max_subscriptions_per_session as usize,

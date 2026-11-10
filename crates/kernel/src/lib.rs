@@ -102,6 +102,8 @@ mod netproto;
 mod ops;
 #[cfg(target_os = "none")]
 mod outbound;
+#[cfg(any(test, target_os = "none"))]
+mod owned_frames;
 #[cfg(target_os = "none")]
 mod plain;
 #[cfg(target_os = "none")]

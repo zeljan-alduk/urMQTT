@@ -950,6 +950,12 @@ it. What it does not cover: interrupt remapping, reserved regions the firmware l
 ID ranges per unit, and any hardware other than QEMU's models (ADR-307). The firmware tables it reads (DMAR,
 IVRS, IORT, the device tree) are fuzzed (`iommu_tables`).
 
+The IOMMU stops a device's DMA, not the kernel's own writes to device registers. Those go wherever the
+device's BARs and capabilities point, so the kernel checks the addresses (ADR-345): each virtio structure and
+the MSI-X table must lie inside its BAR (sized by probing), and no device mapping may overlap RAM in the memory
+map. Before v0.6.1 the MSI-X table's offset and size were not checked against the BAR, and a hostile device
+could have the kernel write its MSI entries into RAM up to 4 GiB above the BAR.
+
 ### Supply chain
 
 Pinned nightly toolchain and `Cargo.lock`; `--locked` builds; cargo-deny

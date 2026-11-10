@@ -214,10 +214,10 @@ pub fn mqtt_limits() -> urmqtt_mqtt::Limits {
     let l = &CONFIG.limits;
     urmqtt_mqtt::Limits {
         max_packet_size: CONFIG.plaintext.max_packet_size,
-        max_topic_len: l.max_topic_len as u16,
-        max_topic_levels: l.max_topic_levels as u16,
-        max_client_id_len: l.max_topic_len as u16,
-        max_topics_per_packet: l.max_subscriptions_per_session as u16,
+        max_topic_len: crate::mqtt_service::limit16(l.max_topic_len),
+        max_topic_levels: crate::mqtt_service::limit16(l.max_topic_levels),
+        max_client_id_len: crate::mqtt_service::limit16(l.max_topic_len),
+        max_topics_per_packet: crate::mqtt_service::limit16(l.max_subscriptions_per_session),
     }
 }
 

@@ -25,6 +25,9 @@ pub const MQTT_MAX_PACKET_SIZE: u32 = 268_435_455;
 pub const MIN_PACKET_SIZE: u32 = 64;
 /// Topic names are length-prefixed with a u16.
 pub const MQTT_MAX_TOPIC_LEN: u32 = 65_535;
+/// Most levels in a topic: the topic-tree walks recurse once per level on
+/// a data core's 128 KiB stack (ADR-346; `urmqtt_cfg`'s `MAX_TOPIC_LEVELS`).
+pub const MAX_TOPIC_LEVELS: u32 = 128;
 /// Placeholder in ACL patterns replaced by the session's device id.
 pub const ID_PLACEHOLDER: &str = "{id}";
 
@@ -2597,6 +2600,12 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
         errors.push(err(
             "limits.max_packet_size",
             format!("must be in {MIN_PACKET_SIZE}..={MQTT_MAX_PACKET_SIZE}"),
+        ));
+    }
+    if raw.max_topic_levels > MAX_TOPIC_LEVELS {
+        errors.push(err(
+            "limits.max_topic_levels",
+            format!("must be in 1..={MAX_TOPIC_LEVELS}"),
         ));
     }
     if raw.max_topic_len == 0 || raw.max_topic_len > MQTT_MAX_TOPIC_LEN {
