@@ -5245,7 +5245,7 @@ device the kernel does not drive is unaffected; one for a driven device would be
    the message, an RA only from a link-local source, an NS from `::` only to a solicited-node group and without
    a link-layer option, no multicast target, a solicited NA never to a group). Router Advertisements keep at most
    8 Prefix Information options (the rest counted); RDNSS is counted and ignored (the broker resolves no names);
-   MLD queries and Redirects are valid and ignored.
+   Redirects are valid and ignored; MLD queries are answered (ADR-331).
 4. **TCP over IPv6** (`crates/tcp`): the pseudo-header by family in one function (`wire::checksum`: IPv4's when
    both addresses are IPv4, else IPv6's with the 32-bit length); the MSS per family (`mss6_for_mtu`: MTU - 60, at
    most 1440 under the 1500-byte frames, `TcpStack::set_mss6`); SYN cookies, timestamps, SACK, window scaling,
@@ -5264,7 +5264,8 @@ device the kernel does not drive is unaffected; one for a driven device would be
      most one global address**: with SLAAC the first autonomous /64 prefix of the Router Advertisements + the same
      EUI-64, or the configured static one. Further prefixes, prefixes other than /64, link-local, multicast and
      all-zero prefixes make no address (the last two found by the `ipv6_nd` fuzzer); they are counted
-     (`net/ipv6/prefixes_ignored`). *Decided:* EUI-64, neither RFC 8981 temporary addresses (a server's address
+     (`net/ipv6/prefixes_ignored`, every advertisement) and logged once per prefix (the last 8 remembered; found in
+     review: a link with a second prefix wrote a log line with every Router Advertisement). *Decided:* EUI-64, neither RFC 8981 temporary addresses (a server's address
      goes into DNS and firewalls; temporary addresses are for clients' privacy) nor RFC 7217 stable-opaque ones
      (they need a secret that survives reboots, which the kernel would have to keep before the store opens, and
      the operator could no longer predict the address from the MAC). The MAC is visible on the link anyway.
@@ -5272,7 +5273,12 @@ device the kernel does not drive is unaffected; one for a driven device would be
      another node in that second marks it duplicate, never used, logged as an error and counted. A tentative
      address takes no traffic. Our preferred addresses are defended (an NS from `::` for one gets an NA to all
      nodes); an NA from another node for one of them is counted, the address kept. An MLDv2 report joins the
-     solicited-node groups (from `::`, RFC 3590) so that switches that snoop MLD deliver Neighbour Solicitations.
+     solicited-node groups (from `::` while the link-local address is tentative, RFC 3590, else from it) so that
+     switches that snoop MLD deliver Neighbour Solicitations, and **every Multicast Listener Query** for all groups
+     or one of ours (link-local source, hop limit 1) is answered with a report, MLDv1 to an MLDv1 querier, at most
+     once a second (found in review: a Linux bridge with a querier otherwise stops delivering the groups after its
+     listener interval, about 260 s, and the router then cannot resolve a static address whose interface
+     identifier differs from the link-local one's).
      No random delay before the first probe (one host per link segment of a VM).
   3. **SLAAC** (RFC 4862 §5.5): three Router Solicitations 4 s apart once the link-local address is usable, then a
      warning if no RA came; the default router and its lifetime, its link-layer address, the MTU (1280 to the
@@ -5355,7 +5361,8 @@ device the kernel does not drive is unaffected; one for a driven device would be
    NUD probing; Secure Neighbour Discovery or RA guard (ND is unauthenticated, as ARP is); UDP over IPv6, so
    SNTP, syslog, statsd and log shipping over TLS stay IPv4; the outbound TCP client over IPv6 (the stack can, the
    configuration's collector is IPv4); `plaintext.ip_identities` with IPv6 networks; IPv6 in the dev-only command-line
-   words (an SNTP server for tests); an IPv6 exposure warning for the plaintext port. A jumbogram is a
+   words (an SNTP server for tests). The plaintext port's boot warning judges the global IPv6 address as it does
+   the IPv4 one (added in review: a VPS's IPv6 address is public even where its IPv4 one is not). A jumbogram is a
    malformed packet.
 
 ## ADR-334 — `network.ipv6`, `network.ipv6_address`, `network.ipv6_gateway` and IPv6 allow-list entries, configuration format 23 (NEXT-1)

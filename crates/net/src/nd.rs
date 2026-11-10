@@ -49,6 +49,10 @@ pub const RS_INTERVAL_MS: u64 = 4000;
 const SOLICIT_EVERY_MS: u64 = 1000;
 /// Neighbour Discovery answers (NA) per second.
 const ND_PER_SEC: u32 = 100;
+/// Ignored prefixes remembered so that each is reported once.
+pub const IGNORED_SEEN: usize = 8;
+/// MLD reports in answer to queries at most this often.
+const MLD_EVERY_MS: u64 = 1000;
 /// RFC 4862 §5.5.3 (e): two hours.
 const TWO_HOURS_MS: u64 = 2 * 3600 * 1000;
 
@@ -136,7 +140,9 @@ pub enum Event6 {
     Mtu {
         mtu: u16,
     },
-    /// An advertised prefix not used (one global address only).
+    /// An advertised prefix not used (one global address only): reported
+    /// once per prefix (the last [`IGNORED_SEEN`] remembered), not on every
+    /// Router Advertisement that repeats it.
     PrefixIgnored {
         prefix: Ip6,
         len: u8,
@@ -165,6 +171,8 @@ pub struct Stats6 {
     pub ra_in: u64,
     pub ra_ignored: u64,
     pub rs_out: u64,
+    /// MLD reports sent (on start, a new address, a query).
+    pub mld_reports: u64,
     pub nd_limited: u64,
     pub dad_ok: u64,
     pub dad_duplicate: u64,
@@ -196,6 +204,12 @@ pub struct Host6 {
     nd_tokens: u32,
     nd_since: u64,
     mld_due: bool,
+    /// When the last MLD report went out (queries are answered at most once
+    /// per [`MLD_EVERY_MS`]).
+    mld_at: Option<u64>,
+    /// Prefixes already reported as ignored, oldest replaced first.
+    ignored: [(Ip6, u8); IGNORED_SEEN],
+    ignored_next: usize,
     /// Events beyond the first of one message (an RA can bring a router, an
     /// MTU and a prefix at once), handed out by [`Host6::poll`]; bounded.
     queued: alloc::collections::VecDeque<Event6>,
@@ -233,6 +247,9 @@ impl Host6 {
             nd_tokens: ND_PER_SEC,
             nd_since: 0,
             mld_due: false,
+            mld_at: None,
+            ignored: [(UNSPECIFIED, 0); IGNORED_SEEN],
+            ignored_next: 0,
             queued: alloc::collections::VecDeque::new(),
             buf: Vec::with_capacity(256),
             stats: Stats6::default(),
@@ -559,6 +576,10 @@ impl Host6 {
                 self.stats.ra_in += 1;
                 self.on_ra(now, ip, &ra)
             }
+            Icmp6::Other(ipv6::ICMP6_MLD_QUERY) => {
+                self.on_mld_query(now, ip, out);
+                None
+            }
             Icmp6::Echo { .. } | Icmp6::RouterSolicit | Icmp6::Other(_) => None,
         }
     }
@@ -718,11 +739,7 @@ impl Host6 {
             return None;
         }
         if p.len != 64 {
-            self.stats.prefixes_ignored += 1;
-            return Some(Event6::PrefixIgnored {
-                prefix: p.prefix,
-                len: p.len,
-            });
+            return self.ignore_prefix(p);
         }
         let addr = with_iid(&p.prefix, eui64(self.mac));
         match self.global.as_mut() {
@@ -756,14 +773,101 @@ impl Host6 {
                 g.on_link |= p.on_link;
                 None
             }
-            Some(_) => {
-                self.stats.prefixes_ignored += 1;
-                Some(Event6::PrefixIgnored {
-                    prefix: p.prefix,
-                    len: p.len,
-                })
+            Some(_) => self.ignore_prefix(p),
+        }
+    }
+
+    /// A prefix that makes no address: counted every time, reported (for
+    /// the log) only the first time. A router repeats its prefixes in every
+    /// advertisement, so a link with a second prefix would otherwise write a
+    /// log line per advertisement for as long as the broker runs.
+    fn ignore_prefix(&mut self, p: &ipv6::PrefixInfo) -> Option<Event6> {
+        self.stats.prefixes_ignored += 1;
+        let key = (p.prefix, p.len);
+        if self.ignored.contains(&key) {
+            return None;
+        }
+        if let Some(slot) = self.ignored.get_mut(self.ignored_next % IGNORED_SEEN) {
+            *slot = key;
+        }
+        self.ignored_next = (self.ignored_next + 1) % IGNORED_SEEN;
+        Some(Event6::PrefixIgnored {
+            prefix: p.prefix,
+            len: p.len,
+        })
+    }
+
+    /// Reports the solicited-node groups of our addresses (owner): MLDv2 to
+    /// the MLDv2 routers, or (`v1`, for an MLDv1 querier) one MLDv1 report
+    /// per group. From the link-local address once it is usable, else from
+    /// `::` (RFC 3590: during DAD).
+    fn send_mld(&mut self, now: u64, v1: bool, out: &mut impl FnMut(&[u8])) {
+        self.mld_at = Some(now);
+        let mut groups: Vec<Ip6> = Vec::with_capacity(2);
+        for a in self.all_addrs().iter().flatten() {
+            let g = solicited_node(a);
+            // SLAAC's two addresses share their interface identifier, so
+            // their group too.
+            if !groups.contains(&g) {
+                groups.push(g);
             }
         }
+        let src = self.ll.filter(Slot::usable).map_or(UNSPECIFIED, |s| s.addr);
+        let mut buf = core::mem::take(&mut self.buf);
+        if v1 {
+            for g in &groups {
+                buf.clear();
+                ipv4::push_eth(&mut buf, multicast_mac(g), self.mac, ipv6::ETHERTYPE_IPV6);
+                ipv6::push_mld_v1_report(&mut buf, &src, g);
+                out(&buf);
+                self.stats.frames_out += 1;
+                self.stats.mld_reports += 1;
+            }
+        } else {
+            buf.clear();
+            ipv4::push_eth(
+                &mut buf,
+                multicast_mac(&ipv6::MLDV2_ROUTERS),
+                self.mac,
+                ipv6::ETHERTYPE_IPV6,
+            );
+            ipv6::push_mld_report(&mut buf, &src, &groups);
+            out(&buf);
+            self.stats.frames_out += 1;
+            self.stats.mld_reports += 1;
+        }
+        self.buf = buf;
+    }
+
+    /// A Multicast Listener Query (owner): answered with a report of our
+    /// groups when it asks about every group or one of ours, at most once a
+    /// second. Without the answers a switch that snoops MLD (a Linux bridge
+    /// with a querier on the link) stops delivering the solicited-node
+    /// groups after its listener interval, and the router can then no longer
+    /// resolve a static address whose interface identifier is not the
+    /// link-local one's.
+    fn on_mld_query(&mut self, now: u64, ip: &Ipv6<'_>, out: &mut impl FnMut(&[u8])) {
+        let Some((group, v1)) = ipv6::mld_query(ip) else {
+            self.stats.bad_icmp += 1;
+            return;
+        };
+        let ours = group == UNSPECIFIED
+            || self
+                .all_addrs()
+                .iter()
+                .flatten()
+                .any(|a| solicited_node(a) == group);
+        if !ours {
+            return;
+        }
+        if self
+            .mld_at
+            .is_some_and(|t| now.saturating_sub(t) < MLD_EVERY_MS)
+        {
+            self.stats.nd_limited += 1;
+            return;
+        }
+        self.send_mld(now, v1, out);
     }
 
     /// Timers (owner): DAD probes and their end, the MLD report, Router
@@ -778,24 +882,7 @@ impl Host6 {
         }
         if self.mld_due {
             self.mld_due = false;
-            let groups: Vec<Ip6> = self
-                .all_addrs()
-                .iter()
-                .flatten()
-                .map(solicited_node)
-                .collect();
-            let mut buf = core::mem::take(&mut self.buf);
-            buf.clear();
-            ipv4::push_eth(
-                &mut buf,
-                multicast_mac(&ipv6::MLDV2_ROUTERS),
-                self.mac,
-                ipv6::ETHERTYPE_IPV6,
-            );
-            ipv6::push_mld_report(&mut buf, &UNSPECIFIED, &groups);
-            out(&buf);
-            self.stats.frames_out += 1;
-            self.buf = buf;
+            self.send_mld(now, false, out);
         }
         for which in [false, true] {
             let slot = if which { self.global } else { self.ll };
@@ -1035,6 +1122,14 @@ mod tests {
                 len: 64
             })
         );
+        // Repeated by the next advertisements: counted, not reported again.
+        for t in [4100, 4200] {
+            assert_eq!(
+                feed(&mut h, t, &ra(other, 100, 50, 1800, None), &mut out),
+                None
+            );
+        }
+        assert_eq!(h.stats.prefixes_ignored, 3);
         // Router lifetime 0 removes the router.
         assert_eq!(
             feed(&mut h, 5000, &ra(PFX, 86400, 14400, 0, None), &mut out),
@@ -1306,5 +1401,104 @@ mod tests {
             feed(&mut h, 1000, &ra(bad, 100, 50, 1800, None), &mut out);
             assert_eq!(h.global_slot(), None, "{bad:02x?}");
         }
+    }
+
+    /// A querier on the link (a router, or a Linux bridge that snoops MLD)
+    /// asks for listeners: every query for all groups or one of ours is
+    /// answered from the link-local address, MLDv2 or MLDv1 as the querier
+    /// speaks, at most once a second; a query from off the link (hop limit
+    /// not 1) or for another group is not.
+    #[test]
+    fn mld_queries_are_answered_so_snooping_switches_keep_our_groups() {
+        let addr: Ip6 = [0x20, 1, 0xd, 0xb8, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10];
+        let mut h = Host6::new(MAC, true);
+        h.start(
+            0,
+            Mode6::Static {
+                addr,
+                prefix_len: 64,
+                gateway: RTR,
+            },
+        );
+        let mut out = Vec::new();
+        drain(&mut h, 0, &mut out);
+        // The report at start goes out from `::` (the addresses are tentative).
+        let first = parse_ipv6(&out[0][14..]).unwrap();
+        assert_eq!((first.src, first.dst), (UNSPECIFIED, ipv6::MLDV2_ROUTERS));
+        drain(&mut h, 1000, &mut out);
+        let query = |group: Ip6, hop: u8, v1: bool| {
+            let mut b = Vec::new();
+            ipv6::push_ipv6(&mut b, &RTR, &ALL_NODES, ipv6::NH_HOP, hop, 0);
+            b.extend_from_slice(&[NH_ICMPV6, 0, 5, 2, 0, 0, 1, 0]);
+            let mut body = group.to_vec();
+            if !v1 {
+                // S/QRV, QQIC, no sources.
+                body.extend_from_slice(&[2, 125, 0, 0]);
+            }
+            ipv6::push_icmp6(
+                &mut b,
+                &RTR,
+                &ALL_NODES,
+                ipv6::ICMP6_MLD_QUERY,
+                0,
+                [0x27, 0x10, 0, 0],
+                &body,
+            );
+            ipv6::fix_len(&mut b, 0);
+            b
+        };
+        let groups = [solicited_node(&link_local_of(MAC)), solicited_node(&addr)];
+        // A general MLDv2 query.
+        out.clear();
+        feed(&mut h, 2000, &query(UNSPECIFIED, 1, false), &mut out);
+        assert_eq!(out.len(), 1);
+        let eth = ipv4::parse_eth(&out[0]).unwrap();
+        assert_eq!(eth.dst, multicast_mac(&ipv6::MLDV2_ROUTERS));
+        let ip = parse_ipv6(eth.payload).unwrap();
+        assert_eq!(
+            (ip.src, ip.dst, ip.hop_limit, ip.ext),
+            (link_local_of(MAC), ipv6::MLDV2_ROUTERS, 1, 1)
+        );
+        assert_eq!(
+            ipv6::parse_icmp6(&ip),
+            Ok(Icmp6::Other(ipv6::ICMP6_MLDV2_REPORT))
+        );
+        // Two records: both solicited-node groups.
+        assert_eq!(&ip.payload[6..8], &[0, 2]);
+        assert_eq!(&ip.payload[12..28], &groups[0]);
+        assert_eq!(&ip.payload[32..48], &groups[1]);
+        // Within the second: not again.
+        out.clear();
+        feed(&mut h, 2500, &query(UNSPECIFIED, 1, false), &mut out);
+        assert!(out.is_empty());
+        // From off the link, or for a group that is not ours: never.
+        feed(&mut h, 4000, &query(UNSPECIFIED, 255, false), &mut out);
+        feed(&mut h, 4000, &query(ALL_ROUTERS, 1, false), &mut out);
+        assert!(out.is_empty());
+        // A group-specific MLDv1 query: one MLDv1 report per group, each to
+        // its group.
+        feed(&mut h, 4000, &query(groups[1], 1, true), &mut out);
+        assert_eq!(out.len(), 2);
+        for (f, g) in out.iter().zip(groups) {
+            let eth = ipv4::parse_eth(f).unwrap();
+            assert_eq!(eth.dst, multicast_mac(&g));
+            let ip = parse_ipv6(eth.payload).unwrap();
+            assert_eq!((ip.src, ip.dst, ip.hop_limit), (link_local_of(MAC), g, 1));
+            assert_eq!(
+                ipv6::parse_icmp6(&ip),
+                Ok(Icmp6::Other(ipv6::ICMP6_MLDV1_REPORT))
+            );
+            assert_eq!(&ip.payload[8..24], &g);
+        }
+        // SLAAC's two addresses share one group: reported once.
+        let (mut s, _) = slaac_up(0);
+        feed(&mut s, 2000, &ra(PFX, 86400, 14400, 1800, None), &mut out);
+        drain(&mut s, 2000, &mut out);
+        drain(&mut s, 3000, &mut out);
+        assert!(s.config().locals.global.is_some());
+        out.clear();
+        feed(&mut s, 5000, &query(UNSPECIFIED, 1, false), &mut out);
+        let ip = parse_ipv6(&out[0][14..]).unwrap();
+        assert_eq!(&ip.payload[6..8], &[0, 1]);
     }
 }

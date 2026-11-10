@@ -295,6 +295,7 @@ pub fn fix_len(buf: &mut [u8], at: usize) {
 pub const ICMP6_ECHO_REQUEST: u8 = 128;
 pub const ICMP6_ECHO_REPLY: u8 = 129;
 pub const ICMP6_MLD_QUERY: u8 = 130;
+pub const ICMP6_MLDV1_REPORT: u8 = 131;
 pub const ICMP6_RS: u8 = 133;
 pub const ICMP6_RA: u8 = 134;
 pub const ICMP6_NS: u8 = 135;
@@ -372,8 +373,8 @@ pub enum Icmp6<'a> {
         override_: bool,
         tlla: Option<Mac>,
     },
-    /// A valid message of a type this host does not act on (MLD queries,
-    /// Redirects, errors).
+    /// A valid message of a type Neighbour Discovery does not act on (MLD
+    /// queries, which [`mld_query`] reads; Redirects; errors).
     Other(u8),
 }
 
@@ -642,6 +643,35 @@ pub fn push_mld_report(buf: &mut Vec<u8>, src: &Ip6, groups: &[Ip6]) {
         &body,
     );
     fix_len(buf, at);
+}
+
+/// An MLDv1 report (RFC 2710 §3) for `group`, to the group itself, with the
+/// Hop-by-Hop Router Alert: the answer to an MLDv1 querier, which does not
+/// read MLDv2 reports (RFC 3810 §8).
+pub fn push_mld_v1_report(buf: &mut Vec<u8>, src: &Ip6, group: &Ip6) {
+    let at = buf.len();
+    push_ipv6(buf, src, group, NH_HOP, 1, 0);
+    buf.extend_from_slice(&[NH_ICMPV6, 0, 5, 2, 0, 0, 1, 0]);
+    push_icmp6(buf, src, group, ICMP6_MLDV1_REPORT, 0, [0; 4], group);
+    fix_len(buf, at);
+}
+
+/// A Multicast Listener Query (RFC 2710 §3.6, RFC 3810 §5.1) this host
+/// answers: from a link-local address with hop limit 1 (RFC 3810 §5.1.14),
+/// 24 bytes (MLDv1) or at least 28 (MLDv2). Returns the multicast address
+/// asked about (`::`: every group) and whether the querier speaks MLDv1.
+pub fn mld_query(ip: &Ipv6<'_>) -> Option<(Ip6, bool)> {
+    let p = ip.payload;
+    if p.first() != Some(&ICMP6_MLD_QUERY) || ip.hop_limit != 1 || !is_link_local(&ip.src) {
+        return None;
+    }
+    let v1 = match p.len() {
+        24 => true,
+        n if n >= 28 => false,
+        _ => return None,
+    };
+    let group: Ip6 = arr(p, 8)?;
+    (group == UNSPECIFIED || group[0] == 0xff).then_some((group, v1))
 }
 
 #[cfg(test)]
