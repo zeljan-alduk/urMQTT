@@ -5561,3 +5561,30 @@ device the kernel does not drive is unaffected; one for a driven device would be
      edition's slot that holds an `[ext]` key; an edition reconfigures its image by rebuilding it with its own
      packer and `mkiso.sh --config-slot`.
   5. **The private repository itself** (`urmqtt-enterprise`) is not created and nothing is published.
+
+## ADR-350 — KeyUpdate answers: one per silent period (PARSERS-1, v0.6.1)
+
+- **Status:** Accepted (security review of v0.6.0, lens "parsers of untrusted bytes"). No configuration format
+  number and no store schema change.
+- **Context.** `RecordLayer::open` answered every post-handshake KeyUpdate with `update_requested` by sealing a
+  27-byte KeyUpdate(update_not_requested) into the caller's output, unconditionally. In the kernel that output is
+  the connection's `pending`, and the 32 KiB bound (`TX_BUF`) is only applied where broker output and WebSocket
+  frames are moved into TLS, never to what the TLS session writes while decrypting input. The receive window does
+  not depend on `pending`, so an authenticated device that advertised a zero window and kept sending 27-byte
+  KeyUpdate records got one 27-byte answer queued per record (about 13 MB/s per core on a host build) until the
+  heap ran out and the allocation failure stopped the whole broker. It contradicted SECURITY.md's "Output buffered
+  per connection: 32 KiB". The attacker needs a valid client certificate (mTLS completes before any KeyUpdate).
+- **Decision.** The record layer remembers that the last record it sealed is such an answer (`answered`, one
+  byte in padding: `TlsSession` does not grow). While it is, a further `update_requested` is applied to the
+  receive keys as before but queues no answer: RFC 8446 §4.6.3 says an implementation that receives several
+  KeyUpdates while it is silent responds with a single update, and that one answer covers them all. Any other
+  record we seal (application data, alerts, our own KeyUpdate) clears the flag, so the next request is answered
+  again. A peer interleaving requests with data that makes us reply can only get answers interleaved with that
+  reply, which already stops at `TX_BUF`. Coalescing was chosen over pausing decryption on a full `pending` or a
+  hard cap that closes the connection: it fixes the cause in the place that creates the bytes, needs no kernel
+  state and keeps a legitimate peer's KeyUpdate working.
+- **Verification.** Unit test `record::tests::key_update_requests_while_silent_get_one_answer` (both suites:
+  1000 requests, one 27-byte answer, keys in step, the next request after data answered again); interop test
+  `handshake::many_key_update_requests_while_silent_queue_one_answer` (a stock rustls 0.23 client with the dev
+  device certificate sends 2000 requests: 27 bytes queued instead of 54 000, data flows both ways afterwards);
+  both fail on v0.6.0. Fuzz targets `tls_record` and `diff_tls_record` re-run.
