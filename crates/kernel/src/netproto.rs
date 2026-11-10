@@ -18,12 +18,13 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use urmqtt_arch::{cpu, time};
-use urmqtt_config::{CONFIG, NetworkMode};
+use urmqtt_config::{CONFIG, Ipv6, NetworkMode};
 use urmqtt_log::{info, warn};
 use urmqtt_net::Class;
 use urmqtt_net::dhcp;
 use urmqtt_net::iface::{Event, Iface, Rx};
-use urmqtt_tcp::{App, CloseReason, ConnId, Endpoint, TcpStack, mss_for_mtu};
+use urmqtt_net::nd::{Event6, Mode6, V6Config};
+use urmqtt_tcp::{Addr, App, CloseReason, ConnId, Endpoint, TcpStack, mss_for_mtu, mss6_for_mtu};
 use urmqtt_virtio::bus::Doorbell;
 use urmqtt_virtio::net::{MAX_PAIRS, MTU_FRAME, NetQueue, RSS_TABLE_LEN, VirtioNet};
 use urmqtt_virtio::wake::{Change, Mode, RxWake, Why};
@@ -87,6 +88,183 @@ fn is_mqtt_port(port: u16) -> bool {
 
 fn ip_str(a: [u8; 4]) -> alloc::string::String {
     alloc::format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3])
+}
+
+fn ip6_str(a: &[u8; 16]) -> alloc::string::String {
+    alloc::format!("{}", Addr::v6(*a))
+}
+
+/// Per data core: the IPv6 counters of its interface (NEXT-1, ADR-331),
+/// for `$SYS`. Relaxed: statistics.
+struct V6Counters {
+    frames_in: core::sync::atomic::AtomicU64,
+    dropped: core::sync::atomic::AtomicU64,
+    fragments: core::sync::atomic::AtomicU64,
+    ext_headers: core::sync::atomic::AtomicU64,
+    dad_duplicate: core::sync::atomic::AtomicU64,
+    prefixes_ignored: core::sync::atomic::AtomicU64,
+}
+
+static V6_COUNTERS: [V6Counters; crate::smp::MAX_CPUS] = [const {
+    V6Counters {
+        frames_in: core::sync::atomic::AtomicU64::new(0),
+        dropped: core::sync::atomic::AtomicU64::new(0),
+        fragments: core::sync::atomic::AtomicU64::new(0),
+        ext_headers: core::sync::atomic::AtomicU64::new(0),
+        dad_duplicate: core::sync::atomic::AtomicU64::new(0),
+        prefixes_ignored: core::sync::atomic::AtomicU64::new(0),
+    }
+}; crate::smp::MAX_CPUS];
+
+/// What core 0's IPv6 state is (addresses, router, MTU), for `$SYS`.
+static V6_STATE: urmqtt_sync::sync::SpinLock<V6Config> =
+    urmqtt_sync::sync::SpinLock::new(V6Config {
+        locals: urmqtt_net::addr::V6Locals::NONE,
+        onlink_len: 0,
+        router: None,
+        mtu: 0,
+    });
+
+/// Publishes core `me`'s IPv6 counters when they moved (cheap when IPv6 is
+/// off: one comparison).
+fn publish_v6(me: usize, iface: &Iface, last_frames: &mut u64) {
+    let s = &iface.v6.stats;
+    if s.frames_in == *last_frames {
+        return;
+    }
+    *last_frames = s.frames_in;
+    if let Some(c) = V6_COUNTERS.get(me) {
+        let r = core::sync::atomic::Ordering::Relaxed;
+        c.frames_in.store(s.frames_in, r);
+        c.dropped.store(s.dropped, r);
+        c.fragments.store(s.fragments, r);
+        c.ext_headers.store(s.ext_headers, r);
+        c.dad_duplicate.store(s.dad_duplicate, r);
+        c.prefixes_ignored.store(s.prefixes_ignored, r);
+    }
+}
+
+/// IPv6 as `$SYS` reports it (NEXT-1, ADR-331).
+pub struct V6Info {
+    pub mode: &'static str,
+    pub link_local: alloc::string::String,
+    pub global: alloc::string::String,
+    pub router: alloc::string::String,
+    pub mtu: u16,
+    pub frames_in: u64,
+    pub dropped: u64,
+    pub fragments: u64,
+    pub ext_headers: u64,
+    pub dad_duplicate: u64,
+    pub prefixes_ignored: u64,
+}
+
+pub fn v6_info() -> V6Info {
+    let c = *V6_STATE.lock();
+    let r = core::sync::atomic::Ordering::Relaxed;
+    let sum = |f: fn(&V6Counters) -> &core::sync::atomic::AtomicU64| -> u64 {
+        V6_COUNTERS.iter().map(|x| f(x).load(r)).sum()
+    };
+    let text = |a: Option<[u8; 16]>| a.map_or_else(alloc::string::String::new, |a| ip6_str(&a));
+    V6Info {
+        mode: CONFIG.network.ipv6.name(),
+        link_local: text(c.locals.link_local),
+        global: text(c.locals.global),
+        router: text(c.router),
+        mtu: c.mtu,
+        frames_in: sum(|x| &x.frames_in),
+        dropped: sum(|x| &x.dropped),
+        fragments: sum(|x| &x.fragments),
+        ext_headers: sum(|x| &x.ext_headers),
+        dad_duplicate: sum(|x| &x.dad_duplicate),
+        prefixes_ignored: sum(|x| &x.prefixes_ignored),
+    }
+}
+
+/// Starts IPv6 on core 0's interface as configured (NEXT-1, ADR-334).
+fn start_v6(iface: &mut Iface, now: u64) {
+    match CONFIG.network.ipv6 {
+        Ipv6::Off => {}
+        Ipv6::Slaac => {
+            info!(
+                "net: ipv6 slaac: link-local address {} (EUI-64), global address from router advertisements",
+                ip6_str(&urmqtt_net::ipv6::link_local_of(iface.mac()))
+            );
+            iface.v6.start(now, Mode6::Slaac);
+        }
+        Ipv6::Static {
+            address,
+            prefix_len,
+            gateway,
+        } => {
+            info!(
+                "net: ipv6 static: {}/{prefix_len} gateway {}, link-local {}",
+                ip6_str(&address),
+                ip6_str(&gateway),
+                ip6_str(&urmqtt_net::ipv6::link_local_of(iface.mac()))
+            );
+            iface.v6.start(
+                now,
+                Mode6::Static {
+                    addr: address,
+                    prefix_len,
+                    gateway,
+                },
+            );
+        }
+    }
+}
+
+/// Core 0: an IPv6 change. Logs it, gives the TCP stack the addresses and
+/// MSS in use, and tells the other cores (ADR-331).
+fn on_v6(e: Event6, iface: &Iface, tcp: &mut TcpStack, link: &mut Link, n: usize) {
+    match e {
+        Event6::AddressUp { addr, global } => info!(
+            "net: ipv6 {} address {} in use (duplicate address detection passed)",
+            if global { "global" } else { "link-local" },
+            ip6_str(&addr)
+        ),
+        Event6::Duplicate { addr } => urmqtt_log::error!(
+            "net: ipv6 address {} is in use by another node on the link (duplicate address detection): not used",
+            ip6_str(&addr)
+        ),
+        Event6::AddressExpired { addr } => {
+            warn!(
+                "net: ipv6 address {}: valid lifetime over, removed",
+                ip6_str(&addr)
+            )
+        }
+        Event6::Router { addr, lifetime_s } => info!(
+            "net: ipv6 default router {} (lifetime {lifetime_s} s)",
+            ip6_str(&addr)
+        ),
+        Event6::RouterGone { addr } => warn!("net: ipv6 default router {} gone", ip6_str(&addr)),
+        Event6::Mtu { mtu } => info!("net: ipv6 mtu {mtu} (router advertisement)"),
+        Event6::PrefixIgnored { prefix, len } => info!(
+            "net: ipv6 prefix {}/{len} advertised, not used (one global /64 address only)",
+            ip6_str(&prefix)
+        ),
+        Event6::NoRouter => warn!(
+            "net: ipv6 slaac: no router advertisement after {} solicitations; link-local only",
+            urmqtt_net::nd::RS_COUNT
+        ),
+    }
+    share_v6(iface, tcp, link, n);
+}
+
+/// Core 0: the IPv6 configuration in use to its TCP stack, `$SYS` and the
+/// other cores.
+fn share_v6(iface: &Iface, tcp: &mut TcpStack, link: &mut Link, n: usize) {
+    if !iface.v6.enabled() {
+        return;
+    }
+    let cfg = iface.v6.config();
+    tcp.set_local6(cfg.locals);
+    tcp.set_mss6(mss6_for_mtu(cfg.mtu));
+    *V6_STATE.lock() = cfg;
+    for core in 1..n {
+        link.send(core, CoreMsg::Ip6Config(cfg));
+    }
 }
 
 fn new_tcp(addr: [u8; 4], ports: Vec<u16>, mtu: u16) -> TcpStack {
@@ -251,6 +429,8 @@ fn apply_static(
             },
         );
     }
+    // The IPv6 MTU follows the link's (ADR-331).
+    share_v6(iface, tcp, link, n);
 }
 
 /// The SYN-cookie key is replaced every 10 minutes (H3, H0-W3); the old one
@@ -432,7 +612,7 @@ fn reserved_port(p: u16) -> bool {
 }
 
 impl App for CoreApp<'_> {
-    fn syn_ok(&mut self, port: u16, remote: [u8; 4]) -> bool {
+    fn syn_ok(&mut self, port: u16, remote: Addr) -> bool {
         port == ECHO_PORT && self.echo.is_some() || self.mqtt.syn_ok(port, remote)
     }
 
@@ -512,6 +692,11 @@ fn drain_mesh(
                     tcp.set_local_addr(addr.map_or([0; 4], |a| a.0));
                     let mtu = iface.set_mtu(mtu);
                     tcp.set_mss(mss_for_mtu(mtu));
+                }
+                CoreMsg::Ip6Config(cfg) => {
+                    iface.v6.set_config(cfg);
+                    tcp.set_local6(cfg.locals);
+                    tcp.set_mss6(mss6_for_mtu(iface.v6.mtu()));
                 }
                 other => mqtt.on_msg(peer, other, link, now),
             }
@@ -793,10 +978,12 @@ fn run_worker(me: usize, mut link: Link, restored: Option<Arc<Restored>>) -> ! {
     let mut cookies = CookieRotation::new(now_ms());
     let mut tcpstats = TcpStatsLog::new(now_ms());
     let mut last_busy_ms = now_ms();
+    let mut v6_frames = 0u64;
     loop {
         let now = now_ms();
         cookies.tick(&mut tcp, now);
         tcpstats.tick(&tcp, now);
+        publish_v6(me, &iface, &mut v6_frames);
         if let Some(l) = qlog.as_mut() {
             l.tick(now);
         }
@@ -1280,6 +1467,9 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
     if let NetworkMode::Static { address, gateway } = CONFIG.network.mode {
         apply_static(&mut iface, &mut tcp, &mut link, n, address, gateway);
     }
+    // IPv6 beside it, when configured (NEXT-1, ADR-334).
+    start_v6(&mut iface, now_ms());
+    let mut v6_frames = 0u64;
     let mut pool: Vec<Frame> = Vec::new();
     let mut local: VecDeque<Frame> = VecDeque::new();
     let mut nic_q: VecDeque<Frame> = VecDeque::new();
@@ -1302,6 +1492,7 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
         let now = now_ms();
         cookies.tick(&mut tcp, now);
         tcpstats.tick(&tcp, now);
+        publish_v6(0, &iface, &mut v6_frames);
         if let Some(c) = dataplane::CONNECTIONS.first() {
             // Relaxed: statistics.
             c.store(
@@ -1398,6 +1589,7 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
                         );
                         tcp.set_local_addr(l.addr);
                         let mtu = apply_mtu(&mut iface, &mut tcp, choose_mtu(Some(&l)), Some(&l));
+                        share_v6(&iface, &mut tcp, &mut link, n);
                         for core in 1..n {
                             link.send(
                                 core,
@@ -1435,6 +1627,7 @@ fn run_core0(mut link: Link, echo: bool, restored: Option<Arc<Restored>>) -> ! {
                             }
                         }
                     }
+                    Event::V6(e) => on_v6(e, &iface, &mut tcp, &mut link, n),
                     Event::PingReply { from, rtt_ms } => {
                         info!(
                             "net: icmp echo reply from {} in {} us",

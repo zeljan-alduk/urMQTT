@@ -14,6 +14,7 @@
 //! counters (`Reason::PerIpEstablished`).
 
 use core::sync::atomic::{AtomicU64, Ordering};
+use urmqtt_net::addr::Addr;
 
 use urmqtt_config::CONFIG;
 use urmqtt_log::info;
@@ -68,13 +69,14 @@ pub fn init(bench: bool) {
     );
 }
 
-fn key(ip: [u8; 4]) -> SourceKey {
-    SourceKey::v4(ip)
+/// An IPv4 address, or the /64 of an IPv6 one (NEXT-1, ADR-332).
+fn key(ip: Addr) -> SourceKey {
+    SourceKey::of(ip)
 }
 
 /// A SYN from `ip` on a TLS port: whether the address is under its limit.
 /// Never changes the table.
-pub fn syn_ok(ip: [u8; 4]) -> bool {
+pub fn syn_ok(ip: Addr) -> bool {
     TABLE.get().is_none_or(|t| t.lock().syn_ok(key(ip)))
 }
 
@@ -90,7 +92,7 @@ pub enum Counted {
 }
 
 /// The final ACK of a TLS connection from `ip`.
-pub fn open(ip: [u8; 4]) -> Counted {
+pub fn open(ip: Addr) -> Counted {
     let Some(t) = TABLE.get() else {
         return Counted::No;
     };
@@ -102,7 +104,7 @@ pub fn open(ip: [u8; 4]) -> Counted {
 }
 
 /// A counted connection from `ip` ended.
-pub fn close(ip: [u8; 4]) {
+pub fn close(ip: Addr) {
     if let Some(t) = TABLE.get() {
         t.lock().close(key(ip));
     }

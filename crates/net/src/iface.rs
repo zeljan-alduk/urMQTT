@@ -130,6 +130,10 @@ impl Iface {
         }
     }
 
+    pub fn mac(&self) -> Mac {
+        self.mac
+    }
+
     pub fn addr(&self) -> Option<Ip> {
         self.addr
     }

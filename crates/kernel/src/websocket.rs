@@ -35,6 +35,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
+use urmqtt_net::addr::Addr;
 
 use urmqtt_broker::sys::{WS_REFUSALS, WsInfo, ws_close_index};
 use urmqtt_config::{CONFIG, WsAuth};
@@ -331,7 +332,7 @@ pub enum Phase {
 
 /// One WebSocket connection of this core.
 struct WsConn {
-    ip: [u8; 4],
+    ip: Addr,
     /// Accepted at (ms), also the upgrade queue's check that an entry is
     /// still this connection.
     at_ms: u64,
@@ -504,11 +505,15 @@ impl WsState {
 
     /// A SYN from `ip`: the listener's own limits (the core's TLS admission
     /// is asked after). Nothing is kept.
-    pub fn syn_ok(&mut self, ip: [u8; 4], now_ms: u64) -> bool {
+    pub fn syn_ok(&mut self, ip: Addr, now_ms: u64) -> bool {
         let Some(shared) = SHARED.get() else {
             return false;
         };
-        match shared.sources.lock().syn(ip, (now_ms / 1000) as u32) {
+        match shared
+            .sources
+            .lock()
+            .syn(crate::plain::src(ip), (now_ms / 1000) as u32)
+        {
             Syn::LockedOut => {
                 self.refused(REFUSED_LOCKED);
                 return false;
@@ -531,7 +536,7 @@ impl WsState {
 
     /// The final ACK of `c` from `ip`, after the TLS admission admitted it:
     /// counts it, or says no.
-    pub fn accept(&mut self, c: u32, ip: [u8; 4], now_ms: u64) -> bool {
+    pub fn accept(&mut self, c: u32, ip: Addr, now_ms: u64) -> bool {
         let Some(shared) = SHARED.get() else {
             return false;
         };
@@ -541,7 +546,11 @@ impl WsState {
         {
             Some(REFUSED_LIMIT)
         } else {
-            match shared.sources.lock().open(ip, (now_ms / 1000) as u32) {
+            match shared
+                .sources
+                .lock()
+                .open(crate::plain::src(ip), (now_ms / 1000) as u32)
+            {
                 Open::Ok => None,
                 Open::LockedOut => Some(REFUSED_LOCKED),
                 Open::TooMany | Open::Full => Some(REFUSED_LIMIT),
@@ -618,7 +627,10 @@ impl WsState {
             bump(&STATS.closes_abrupt);
         }
         if let Some(shared) = SHARED.get() {
-            shared.sources.lock().close(w.ip, (now_ms / 1000) as u32);
+            shared
+                .sources
+                .lock()
+                .close(crate::plain::src(w.ip), (now_ms / 1000) as u32);
         }
         STATS.open.fetch_sub(1, Ordering::AcqRel);
     }
@@ -852,14 +864,14 @@ impl WsState {
         let ip = w.ip;
         // Owned, so that the authenticator is free again (it borrows the
         // identity of a run-time account from its table).
-        let verdict = match auth.authenticate(ip, p.username, p.password) {
+        let verdict = match auth.authenticate(ip.as_v4(), p.username, p.password) {
             Verdict::Accept(id) => Ok(String::from(id)),
             v @ Verdict::Reject(why) => Err((why, v.connack_code())),
         };
         match verdict {
             Ok(identity) => {
                 if let Some(shared) = SHARED.get() {
-                    shared.sources.lock().succeeded(ip);
+                    shared.sources.lock().succeeded(crate::plain::src(ip));
                 }
                 bump(&STATS.auth_ok);
                 if p.client_id.is_empty() && !p.clean_session {
@@ -884,10 +896,10 @@ impl WsState {
             Err((why, code)) => {
                 let n = bump(&STATS.auth_failed);
                 if n.is_power_of_two() {
-                    let [a, b, cc, d] = ip;
+                    let a = ip;
                     // The user name is not printed: the client chose it.
                     warn!(
-                        "websocket: login refused for {a}.{b}.{cc}.{d} ({}), {n} so far",
+                        "websocket: login refused for {a} ({}), {n} so far",
                         why.text()
                     );
                 }
@@ -905,15 +917,19 @@ impl WsState {
         }
     }
 
-    fn fail(&mut self, ip: [u8; 4], now_ms: u64) {
+    fn fail(&mut self, ip: Addr, now_ms: u64) {
         let Some(shared) = SHARED.get() else {
             return;
         };
-        if shared.sources.lock().failed(ip, (now_ms / 1000) as u32) {
+        if shared
+            .sources
+            .lock()
+            .failed(crate::plain::src(ip), (now_ms / 1000) as u32)
+        {
             let n = bump(&STATS.lockouts);
-            let [a, b, c, d] = ip;
+            let a = ip;
             warn!(
-                "websocket: {a}.{b}.{c}.{d} is locked out for {} s after {} failed login(s) ({n} lock-out(s) so far)",
+                "websocket: {a} is locked out for {} s after {} failed login(s) ({n} lock-out(s) so far)",
                 CONFIG.websocket.lockout_s, CONFIG.websocket.max_failed_auths_per_ip
             );
         }

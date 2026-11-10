@@ -23,6 +23,7 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 use core::sync::atomic::{AtomicU64, Ordering};
+use urmqtt_net::addr::Addr;
 
 use urmqtt_config::{CONFIG, PlainAuth};
 use urmqtt_log::{info, warn};
@@ -291,10 +292,26 @@ pub enum Decision {
     Refuse(u8),
 }
 
+/// Whether the allow-list takes `ip` (either family, ADR-334).
+pub(crate) fn allows(list: &urmqtt_plain::AllowList, ip: Addr) -> bool {
+    match ip.as_v4() {
+        Some(v4) => list.allows(v4),
+        None => list.allows6(&ip.octets()),
+    }
+}
+
+/// The source the table counts: an IPv4 address or an IPv6 /64 (ADR-332).
+pub(crate) fn src(ip: Addr) -> urmqtt_plain::Src {
+    match ip.as_v4() {
+        Some(v4) => v4.into(),
+        None => ip.octets().into(),
+    }
+}
+
 /// One plaintext connection of this core.
 #[derive(Clone, Copy)]
 struct PlainConn {
-    ip: [u8; 4],
+    ip: Addr,
     /// Counted in the table of addresses and in `STATS.open`.
     counted: bool,
     /// Between the final ACK and the CONNECT's decision.
@@ -377,11 +394,11 @@ impl PlainState {
     /// A SYN for the plaintext port from `ip`: whether to answer it. No state
     /// is kept for a SYN that is refused, and none is made for one that is
     /// answered (the SYN cookie carries it).
-    pub fn syn_ok(&mut self, ip: [u8; 4], now_ms: u64, heap_ok: bool, db_behind: bool) -> bool {
+    pub fn syn_ok(&mut self, ip: Addr, now_ms: u64, heap_ok: bool, db_behind: bool) -> bool {
         let Some(shared) = Self::shared() else {
             return false;
         };
-        if !shared.allow.allows(ip) {
+        if !allows(&shared.allow, ip) {
             let n = bump(&STATS.refused_source);
             self.log_every_power_of_two(
                 0,
@@ -390,7 +407,7 @@ impl PlainState {
             );
             return false;
         }
-        let verdict = shared.sources.lock().syn(ip, (now_ms / 1000) as u32);
+        let verdict = shared.sources.lock().syn(src(ip), (now_ms / 1000) as u32);
         match verdict {
             Syn::LockedOut => {
                 let n = bump(&STATS.refused_locked);
@@ -434,7 +451,7 @@ impl PlainState {
     pub fn accept(
         &mut self,
         c: u32,
-        ip: [u8; 4],
+        ip: Addr,
         now_ms: u64,
         heap_ok: bool,
         db_behind: bool,
@@ -443,7 +460,7 @@ impl PlainState {
             return false;
         };
         let now_s = (now_ms / 1000) as u32;
-        if !shared.allow.allows(ip) {
+        if !allows(&shared.allow, ip) {
             bump(&STATS.refused_source);
             return false;
         }
@@ -461,7 +478,7 @@ impl PlainState {
         let refuse = if open > u64::from(CONFIG.plaintext.max_connections) {
             Some(false)
         } else {
-            match shared.sources.lock().open(ip, now_s) {
+            match shared.sources.lock().open(src(ip), now_s) {
                 Open::Ok => None,
                 Open::LockedOut => Some(true),
                 Open::TooMany | Open::Full => Some(false),
@@ -510,7 +527,7 @@ impl PlainState {
         }
         if pc.counted {
             if let Some(shared) = Self::shared() {
-                shared.sources.lock().close(pc.ip, now_s);
+                shared.sources.lock().close(src(pc.ip), now_s);
             }
             STATS.open.fetch_sub(1, Ordering::AcqRel);
         }
@@ -527,12 +544,15 @@ impl PlainState {
         let (Some(pc), Some(shared)) = (self.conns.get(c).copied(), Self::shared()) else {
             return;
         };
-        let locked = shared.sources.lock().failed(pc.ip, (now_ms / 1000) as u32);
+        let locked = shared
+            .sources
+            .lock()
+            .failed(src(pc.ip), (now_ms / 1000) as u32);
         if locked {
             let n = bump(&STATS.lockouts);
-            let [a, b, c, d] = pc.ip;
+            let a = pc.ip;
             warn!(
-                "plaintext: {a}.{b}.{c}.{d} is locked out for {} s after {} failed login(s) ({n} lock-out(s) so far)",
+                "plaintext: {a} is locked out for {} s after {} failed login(s) ({n} lock-out(s) so far)",
                 CONFIG.plaintext.lockout_s, CONFIG.plaintext.max_failed_auths_per_ip
             );
         }
@@ -545,7 +565,10 @@ impl PlainState {
         };
         // Owned, so that the authenticator is free again (it borrows the
         // identity of a run-time account from its table).
-        let verdict = match self.auth.authenticate(pc.ip, p.username, p.password) {
+        let verdict = match self
+            .auth
+            .authenticate(pc.ip.as_v4(), p.username, p.password)
+        {
             Verdict::Accept(id) => Ok(String::from(id)),
             v @ Verdict::Reject(why) => Err((why, v.connack_code())),
         };
@@ -554,10 +577,10 @@ impl PlainState {
             Err((why, code)) => {
                 let n = bump(&STATS.auth_failed);
                 if n.is_power_of_two() {
-                    let [a, b, cc, d] = pc.ip;
+                    let a = pc.ip;
                     // The user name is not printed: the client chose it.
                     warn!(
-                        "plaintext: login refused for {a}.{b}.{cc}.{d} ({}), {n} so far",
+                        "plaintext: login refused for {a} ({}), {n} so far",
                         why.text()
                     );
                 }
@@ -566,7 +589,7 @@ impl PlainState {
             }
         };
         if let Some(shared) = Self::shared() {
-            shared.sources.lock().succeeded(pc.ip);
+            shared.sources.lock().succeeded(src(pc.ip));
         }
         bump(&STATS.auth_ok);
         // The client id is only the tail of the session's name, so it is free

@@ -66,7 +66,7 @@ impl LogShip {
         let o = &CONFIG.observability;
         let dst = o.log_tls?;
         let ep = Endpoint {
-            addr: dst.addr,
+            addr: urmqtt_tcp::Addr::v4(dst.addr),
             port: dst.port,
         };
         match TlsLink::new("logtls", ep, o.log_tls_name, o.log_tls_ca, now_ms) {

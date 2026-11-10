@@ -26,6 +26,7 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
+use urmqtt_net::addr::Addr;
 
 use urmqtt_broker::metrics::Own;
 use urmqtt_config::CONFIG;
@@ -135,7 +136,7 @@ pub fn announce(cores: usize) {
 
 /// One metrics connection of this core.
 struct MConn {
-    ip: [u8; 4],
+    ip: Addr,
     /// Accepted at (ms): the deadline's start, and the queue's check that an
     /// entry is still this connection.
     at_ms: u64,
@@ -204,11 +205,11 @@ impl MetricsState {
 
     /// A SYN for the metrics port from `ip`: whether to answer it. A refused
     /// SYN keeps no state.
-    pub fn syn_ok(&mut self, ip: [u8; 4], now_ms: u64, heap_ok: bool) -> bool {
+    pub fn syn_ok(&mut self, ip: Addr, now_ms: u64, heap_ok: bool) -> bool {
         let Some(shared) = SHARED.get() else {
             return false;
         };
-        if !shared.allow.allows(ip) {
+        if !crate::plain::allows(&shared.allow, ip) {
             let n = bump(&STATS.refused_source);
             self.log_every_power_of_two(
                 0,
@@ -234,11 +235,11 @@ impl MetricsState {
 
     /// The final ACK of a connection `c` from `ip`: admits and counts it, or
     /// says no (the peer gets a RST).
-    pub fn accept(&mut self, c: u32, ip: [u8; 4], now_ms: u64, heap_ok: bool) -> bool {
+    pub fn accept(&mut self, c: u32, ip: Addr, now_ms: u64, heap_ok: bool) -> bool {
         let Some(shared) = SHARED.get() else {
             return false;
         };
-        if !shared.allow.allows(ip) {
+        if !crate::plain::allows(&shared.allow, ip) {
             bump(&STATS.refused_source);
             return false;
         }
@@ -329,7 +330,8 @@ fn scrape(method: Method, format: Format) -> Vec<u8> {
     let mut accepted = [0u64; crate::smp::MAX_CPUS];
     let mut queues = [urmqtt_broker::sys::NetQueueSys::default(); urmqtt_virtio::net::MAX_PAIRS];
     let t0 = urmqtt_arch::time::uptime_ns();
-    let info = crate::sys::collect(&mut busy, &mut accepted, &mut queues);
+    let v6 = crate::netproto::v6_info();
+    let info = crate::sys::collect(&mut busy, &mut accepted, &mut queues, &v6);
     let body = urmqtt_broker::metrics::render(&info, &own(), matches!(format, Format::OpenMetrics));
     urmqtt_log::debug!(
         "metrics: scrape rendered {} bytes in {} us",

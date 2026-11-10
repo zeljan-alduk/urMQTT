@@ -139,6 +139,9 @@ pub enum CoreMsg {
         /// The link MTU in use (NOW-19, ADR-264).
         mtu: u16,
     },
+    /// Core 0 → all: the IPv6 addresses, router or MTU changed (NEXT-1,
+    /// ADR-331).
+    Ip6Config(urmqtt_net::nd::V6Config),
 }
 
 struct Mesh {
@@ -886,8 +889,15 @@ pub fn home_of(client_id: &str, n: usize) -> usize {
 /// The data core that owns a TCP flow: the hash modulo the workers, or,
 /// once the NIC's RSS steers flows ([`steer_by_table`]), the indirection
 /// table the device uses, so both agree (ADR-311).
-pub fn core_of_flow(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16, n: usize) -> usize {
-    let h = urmqtt_net::rss::ipv4_tcp(src, dst, sport, dport);
+pub fn core_of_flow(
+    src: urmqtt_net::addr::Addr,
+    dst: urmqtt_net::addr::Addr,
+    sport: u16,
+    dport: u16,
+    n: usize,
+) -> usize {
+    // IPv4 and IPv6 alike (ADR-333): the Toeplitz hash of the family's tuple.
+    let h = urmqtt_net::rss::tcp(src, dst, sport, dport);
     // Relaxed: set once before the other data cores start.
     if STEER_BY_TABLE.load(Ordering::Relaxed) {
         let w = workers(n);

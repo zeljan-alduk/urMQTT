@@ -140,7 +140,7 @@ fn plan_checks_every_field_the_device_gives() {
 fn the_rss_command_is_laid_out_as_the_specification_says() {
     let key: [u8; RSS_KEY_LEN] = core::array::from_fn(|i| i as u8 + 1);
     let t = table(3);
-    let c = rss_command(&t, 3, &key);
+    let c = rss_command(&t, 3, &key, HASH_TCPV4);
     assert_eq!(c.len(), 2 + 4 + 2 + 2 + 256 + 2 + 1 + 40);
     assert_eq!(&c[..2], &[4, 1], "VIRTIO_NET_CTRL_MQ, _RSS_CONFIG");
     assert_eq!(&c[2..6], &HASH_TCPV4.to_le_bytes());
@@ -153,6 +153,27 @@ fn the_rss_command_is_laid_out_as_the_specification_says() {
     assert_eq!(&c[266..268], &3u16.to_le_bytes(), "max_tx_vq");
     assert_eq!(c[268], 40, "hash_key_length");
     assert_eq!(&c[269..], &key);
+}
+
+/// NEXT-1, ADR-333: a device that offers TCP/IPv6 hashing is asked for it
+/// beside TCP/IPv4 (and for nothing else it offers), so IPv6 flows land on
+/// their core's pair as IPv4 ones do.
+#[test]
+fn tcp_ipv6_hashing_is_asked_for_where_offered() {
+    let env = FakeEnv::default();
+    let bus = device(MQ_ALL, 4);
+    cfg(&bus, 4, 40, 128, HASH_TCPV4 | HASH_TCPV6 | 1 | (1 << 3));
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    answer(&bus, 0, seen.clone());
+    let mut net = VirtioNet::new_multi(&bus, &env, 4, Some).unwrap();
+    let key = [0x6d; RSS_KEY_LEN];
+    net.enable_rss(&env, &table(4), 4, &key).unwrap();
+    let c = &seen.borrow()[0];
+    assert_eq!(&c[2..6], &(HASH_TCPV4 | HASH_TCPV6).to_le_bytes());
+    assert_eq!(
+        c,
+        &rss_command(&table(4), 4, &key, HASH_TCPV4 | HASH_TCPV6).to_vec()
+    );
 }
 
 #[test]
@@ -173,7 +194,11 @@ fn four_pairs_with_rss_hand_out_their_queues() {
     net.enable_rss(&env, &table(4), 4, &key).unwrap();
     assert_eq!((net.active, net.single), (4, None));
     assert_eq!(seen.borrow().len(), 1);
-    assert_eq!(seen.borrow()[0], rss_command(&table(4), 4, &key).to_vec());
+    assert_eq!(
+        seen.borrow()[0],
+        rss_command(&table(4), 4, &key, HASH_TCPV4).to_vec(),
+        "the device offers no TCP/IPv6 hashing: only TCP/IPv4 is asked for"
+    );
     let mut q2 = net.take_queue(2).unwrap();
     assert_eq!(q2.pair, 2);
     assert!(q2.rx_irq);
