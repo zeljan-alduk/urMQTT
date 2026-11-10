@@ -15,7 +15,7 @@
 | `urmqtt-cfg` | `crates/cfg` | 8018 | 0 | 0 (0) | forbid |
 | `urmqtt-config` | `crates/config` | 2263 | 0 | 10 (10) | deny |
 | `urmqtt-config-schema` | `crates/config-schema` | 8886 | 0 | 0 (0) | forbid |
-| `urmqtt-config-tool` | `tools/config` | 2550 | 1473 | 0 (0) | default |
+| `urmqtt-config-tool` | `tools/config` | 2550 | 1475 | 0 (0) | default |
 | `urmqtt-control` | `crates/control` | 974 | 0 | 0 (0) | forbid |
 | `urmqtt-control-tool` | `tools/control` | 610 | 0 | 0 (0) | default |
 | `urmqtt-dbworker` | `crates/dbworker` | 172 | 0 | 22 (22) | default |

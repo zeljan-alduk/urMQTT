@@ -106,9 +106,9 @@ from them at the H10 commit (H0 baseline: 30 773 lines, 65 linked crates, 308
 
 **`unsafe` in non-test code of the workspace:** 937 sites, **all 937 with a
 `// SAFETY:` comment or a `# Safety` section** (the tool crate `builder-wasm`
-accounts for 29 of them and the fake virtio device of the tests and fuzz targets,
+accounts for 30 of them and the fake virtio device of the tests and fuzz targets,
 `virtio/src/fake.rs`, behind the `fake` feature, for 6; neither is in the image). In
-the image: 890 (889 and 860 at H10; the 1 added by NOW-18 (ADR-336) is the `Region` over a BAR an edition's
+the image: 901 (890 before v0.6.0, 860 at H10; v0.6.0 added 11, the 1 of NOW-18 and the 10 of LATER-5; the 1 added by NOW-18 (ADR-336) is the `Region` over a BAR an edition's
 driver maps, `PciDevice::map_bar` in `kernel/src/ext.rs`, unused by the open image; the `no_mangle` of
 `urmqtt_kmain` moved from `boot.rs` into the `image!` macro of the same file; the 9 added by ADR-255 are the aarch64 calls into
 the assembly; the 3 added by ADR-256 are the virtio-gpu driver's request slots and
@@ -124,18 +124,100 @@ tables in `kernel/src/iommu.rs`, the cache clean for a non-coherent unit on each
 | Crate | Sites (justified) | Crate lint |
 |---|---|---|
 | `urmqtt-store` | 302 (302) | deny, with `allow` on the FFI modules (`db`, `ffi`, `libc`, `vfs`, `init`, the log callback, the worker's half) |
-| `urmqtt-arch-x86_64` | 157 (157) | deny; port I/O, MSRs, control registers, interrupt entry |
+| `urmqtt-arch-x86_64` | 157 (157) | deny; port I/O, MSRs, control registers, interrupt entry, the cache clean for a non-coherent IOMMU (ADR-305) |
 | `urmqtt-kernel` | 127 (127) | deny; `cpu_dispatch.rs` (the sealed section, the `urmqtt_cpu_has` export), boot requests, user mode, the IOMMU glue (ADR-305), an edition driver's BAR mapping (ADR-336) |
-| `urmqtt-arch-aarch64` | 110 (110) | deny; all assembly and system registers, the ARMv8 CRC-32C intrinsics, the GICv3 ITS (ADR-270) |
+| `urmqtt-arch-aarch64` | 110 (110) | deny; all assembly and system registers, the ARMv8 CRC-32C intrinsics, the GICv3 ITS (ADR-270), the cache clean for a non-coherent IOMMU (ADR-305) |
 | `urmqtt-mm` | 74 (74) | deny; frames, heap, slabs, key slab |
 | `urmqtt-dbworker` | 22 (22) | default; the worker's entry and syscall stub |
 | `urmqtt-nistz256` | 28 (28) | allow; the calls into the vendored P-256 assembly (x86_64 and aarch64) and the comb table's reinterpretation (ADR-130, ADR-255) |
 | `urmqtt-sync` | 19 (19) | deny; spinlock, once-cell, SPSC ring |
 | `urmqtt-virtio` | 30 (30) | deny; 6 of them in the fake device (tests, fuzzing; not in the image) |
 | `urmqtt-log` | 12 (12) | deny |
-| `urmqtt-config` | 9 (9) | deny; the typed `CONFIG` in `.bss` |
+| `urmqtt-config` | 10 (10) | deny; the typed `CONFIG` in `.bss` |
 | `urmqtt-usys` | 8 (8) | default; the kernel and worker's shared formats |
 | `urmqtt-x25519` | 8 (8) | default; the MULX/ADX assembly (x86_64, ADR-131) and the `mul`/`umulh` inline assembly (AArch64, ADR-259; written for this project, no third-party code) |
+
+**Growth of the trusted base in v0.6.0 by NOW-14 (ADR-280 to ADR-284), the per-address connection limit:** no new
+crate, no new `unsafe`. Own code: `net/src/source_limit.rs` (the table: a 128-bit `SourceKey`, eight-slot buckets
+under a per-boot random key, 32 768 slots, 768 KiB; about 250 lines without tests), `kernel/src/conn_limit.rs`
+(about 120 lines) and the new counters in `net/src/admission.rs`. No third-party code becomes reachable. Remote
+input: the source address of any TLS or WebSocket connection, but only at its final ACK (a spoofed SYN leaves no
+trace). **On by default** (`limits.max_connections_per_ip` 1024; 0 turns it off). Residual risk: the bucket hash
+is a keyed multiply-and-xor mix, not a cryptographic function, and a full bucket (or more than 32 768 addresses)
+lets a new address through uncounted (`per_address/untracked`): fail open by design (ADR-280 point 6), so a
+collision costs the limit, never another address's service; devices behind one NAT share the limit.
+
+**Growth of the trusted base in v0.6.0 by NOW-15 (ADR-285 to ADR-289), run-time password accounts:** no new crate,
+no new dependency (`urmqtt-control` gains a path dependency on `urmqtt-cfg`, already in the image), no new `unsafe`.
+Own code: `control/src/lib.rs` (`set-account` and `remove-account`: `parse_account`, `decode_body`; about 170
+lines more), `kernel/src/control.rs` (applying them, about 130 lines more), `plain/src/auth.rs` (the run-time
+accounts beside the image's, rows re-parsed by `PasswordHash::parse`, a malformed one never logs in; about 70 lines
+more), the account classes in `broker/src/lib.rs`, store schema 6 (`store/src/schema.rs`, four statements in
+`store/src/store.rs`). Third-party code: none new; SQLite runs the new statements inside the dbworker (EL0,
+ADR-210), and the PBKDF2 behind a login is the plaintext listener's own. Remote input: only a holder of the control
+signing key over a service identity's mutual TLS (the H1 checks: Ed25519 signature, sequence number, validity
+window), then a password login on the plaintext or WebSocket listener. **Off by default**
+(`limits.max_runtime_accounts` 0: the control channel refuses account commands). Residual risk: the hashes on the
+data disk allow offline guessing (as the image's do), a restored old disk brings back its old accounts, and whoever
+can write an unencrypted data disk can add an account (encryption at rest closes that, as for the other tables).
+
+**Growth of the trusted base in v0.6.0 by NEXT-9 (ADR-290 to ADR-294), the Prometheus endpoint:** one new crate,
+`urmqtt-http` (`http/src/lib.rs`, about 420 lines, `forbid(unsafe_code)`, no dependency, no allocation: the bounded
+GET or HEAD reader), no new third-party crate, no new `unsafe`. Own code beside it: `broker/src/metrics.rs` (the
+exposition from the same `Info` as `$SYS`, trusted data only; about 1 060 lines, tests apart),
+`kernel/src/metrics.rs` (the listener, about 350 lines) and its hooks in `kernel/src/mqtt_service.rs`, the
+`[metrics]` checks in `cfg/src/{check,fields}.rs`. Remote input: one HTTP request (2 KiB, 24 header lines) from
+hosts in `metrics.allow_from` only; every other address is refused at the SYN and gets no answer. No label of the
+output is chosen by a client. **Off by default** (`metrics.enabled` false; `allow_from` required, no "anywhere").
+Residual risk: plain HTTP with no login, so a passive attacker on the path, or anyone on an allowed network who can
+forge a source address, reads the numbers (the broker's version, load and refusal counters; no payload, topic,
+client id or address); the endpoint is read-only.
+
+**Growth of the trusted base in v0.6.0 by NEXT-11 (ADR-295 to ADR-299), A/B boot slots:** no new crate, no new
+`unsafe`. Own code: `store/src/slots.rs` (the slot state in the GPT entries' attribute bits and names, every
+operation crash-safe; one implementation for the kernel and `urmqtt-disk`; about 1 050 lines, tests apart),
+`kernel/src/bootslot.rs` (count, confirm, switch back; about 360 lines), `store/src/gpt.rs` (the reserved region,
+about 80 lines more), the partition GUID Limine reports (`boot.rs`, a bounds-checked read of the raw structure),
+`boot-confirm` and `boot-rollback` in `control/src/lib.rs` and `kernel/src/control.rs`. Third-party code: none in
+the image; the offline `urmqtt-disk slots stage` checks a release's minisign signature with the code of
+`urmqtt-config check-release` (ed25519-dalek, host only). Input: the partition table, read at every boot of a disk
+with two slots and written (partition-table sectors only, never an ESP) for the trial count, the confirmation and
+a switch back; the two control messages (signed like every control message, bound to the boot disk's GUID). **On
+for every disk a v0.6.0 kernel prepares** (the standby region is reserved at the first boot); a disk prepared before
+keeps one slot and is not touched. Residual risk: the slot commitment (a SHA-256 prefix) and the downgrade rules
+catch a cut or an operator's mistake, not an attacker who can write the disk (H8-W6); a kernel that dies before its
+block driver is not counted (A295-W1); a cut in one window of the last trial boot (A296-W1).
+
+**Growth of the trusted base in v0.6.0 by LATER-5 (ADR-305 to ADR-307), DMA remapping:** one new crate,
+`urmqtt-iommu` (the VT-d, AMD-Vi and SMMUv3 drivers and the shared page tables: `iommu/src/{lib,pt,vtd,amdvi,
+smmuv3}.rs`, about 1 340 lines without tests, `deny(unsafe_code)` and none), no third-party crate, and **10 new
+`unsafe` sites**: in `kernel/src/iommu.rs` (the glue, about 660 lines) the four register accessors of `impl Regs
+for Mmio` (`read32`, `write32`, `read64`, `write64`, bounds-checked against the mapped frame by `Mmio::at`) and the
+two table accesses through the HHDM of `impl Env for KEnv` (`read`, `write`); `clean_dcache_range` in
+`arch-aarch64/src/cpu.rs` (`dc cvac`, 1) and in `arch-x86_64/src/cpu.rs` (`clflush` and `mfence`, 2), the cache
+clean for a non-coherent unit; and `devices::iommu_dma_test` in `kernel/src/devices.rs` (the read of its probe page,
+1; the dev word `test=iommu-dma`, which a production image ignores). The firmware's descriptions are parsed by
+`platform/src/iommu.rs` (DMAR, IVRS, IORT, the device tree's `arm,smmu-v3`; about 600 lines, tests apart) **at
+every boot**, whatever the mode; virtio drivers now accept `VIRTIO_F_ACCESS_PLATFORM` when a device offers it.
+Input: firmware tables (trusted in a VM), the units' registers and fault records (polled, at most 16 per unit per
+poll, ADR-306); no network input reaches any of it. **Off by default** (`devices.iommu = "off"`: no unit is driven,
+none of the 10 sites but the dev one is reached). Residual risk: `KEnv::va` checks only the alignment of the
+physical address the driver crate asks for, so a logic bug in the safe `urmqtt-iommu` would be a kernel memory
+write: that crate belongs to the `unsafe` contract and is reviewed as such; not run on real hardware or under KVM,
+no interrupt remapping, reserved regions counted not mapped, the non-coherent cache path untested (ADR-307).
+
+**Growth of the trusted base in v0.6.0 by NEXT-6 (ADR-310 to ADR-314), virtio-net multiqueue:** no new crate, no new
+`unsafe` (the MSI-X table write of ADR-270 is generalised to entry k behind a bounds check, `MsixTable::write`; a
+queue's doorbell, `Doorbell` in `virtio/src/bus.rs`, is a copy of the existing notification `Region`). Own code:
+`virtio/src/net.rs` (MQ, the control queue, the RSS command, `net::plan` checking every device field; about 425
+lines more, tests apart), the shared indirection table in `net/src/rss.rs`, and in the kernel the per-pair queues
+on the worker cores (`kernel/src/{netproto,devices,dataplane}.rs`, about 710 lines more). Third-party code: none.
+Input: the device's configuration fields and its answer on the control queue (the hypervisor's device, trusted in
+a VM, ADR-270), and network frames that now reach a worker core directly: each is classified with the dispatcher's
+parser and a frame that is not that core's flow is forwarded to core 0, so no new parser faces the network. **On
+by default where the device offers MQ, the control queue and RSS** (`devices.virtio_net_queues = "auto"`), one pair
+as in v0.5.0 otherwise or with `"single"`. Residual risk: a device that applied the RSS configuration after the
+1 s timeout would steer flows to pairs no core reads (availability, ADR-314); not verified on a KVM host (D-9).
 
 **Growth of the trusted base in v0.6.0 by NEXT-7 (ADR-315 to ADR-319), outbound connections:** no new crate, no
 new `unsafe`. Own code: the TCP active open (`tcp/src/active.rs`, about 420 lines; `dial.rs`, `queue.rs`), the TLS
@@ -145,6 +227,46 @@ server-certificate verification (EKU serverAuth, name and IP SAN matching), both
 side; reachable only from the peer at the address the image names, after a TCP connection the broker opened, and
 only when `observability.log_tls` is set (off by default). There is **no request forgery from remote input**: no
 device, control message, `$SYS` topic or packet can choose or change a destination (ADR-319 point 3).
+
+**Growth of the trusted base in v0.6.0 by LATER-6 (ADR-320 to ADR-324), Secure Boot:** no new crate, no new
+`unsafe`, no configuration key. In the image: the pin scanner `cfg/src/seal.rs` (about 130 lines without tests) and
+the own BLAKE2b `cfg/src/blake2b.rs` (about 140 lines, until now host-only) are linked into the kernel's installer,
+which checks with `check_seal` (`store/src/install.rs`, about 60 lines more) that a sealed installation image pins
+the configuration it would write, before its first write. Input: the installation image, which Limine has already
+checked against the ISO menu's hash; only the `install` entry reaches it, and no network input does. On the build
+host, `scripts/sign-loaders.sh` (`sign-iso`, `authenticode`, `ovmf-vars`; about 120 lines more) and `mkiso.sh
+--seal` run openssl, osslsigncode or sbsign and virt-firmware: a supply-chain matter of whoever signs, not runtime
+TCB. **Sealing applies to signed images only**; unsigned images are built byte for byte as before. Residual risk:
+no version counter (an older signed image nobody revoked in `dbx` boots: H8-W6 stays open in part), no shim/MOK,
+no project-signed release, the BIOS path unsigned (H8-W3).
+
+**Growth of the trusted base in v0.6.0 by LATER-7 (ADR-325 to ADR-329), disk key slots and the console
+passphrase:** no new crate, no new `unsafe`. Own code: `store/src/keyslot.rs` (RFC 3394 key wrap, the slot codec,
+the passphrase rules, the line editor; about 460 lines, tests apart), the wrapped superblock in
+`store/src/{disk,layout}.rs` (about 280 lines more), `kernel/src/unlock.rs` (the prompt, about 270 lines) and its
+call in `kernel/src/db.rs`. Third-party code that becomes reachable in a new way: RustCrypto's `aes` used directly
+as a block cipher for the key wrap (already linked for XTS), with the own PBKDF2-HMAC-SHA-256 of `cfg/src/passwd.rs`
+(`sha2`) and `zeroize`. Input: the console (serial port, the PS/2 keyboard through `diag`'s reader, a
+virtio-console, a virtio-input keyboard), i.e. whoever holds the VM's console; and the key slot header of the data
+disk (iterations 10 000 to 10 000 000, anything else refused; fuzz target `disk_keyslot`). No network input: the
+prompt runs before the store opens and before anything listens. **Off by default** (`storage.disk_key_source =
+"image"`). Residual risk: the header is plaintext, so whoever copies the volume guesses the passphrase offline at
+one PBKDF2 per guess (a strong passphrase is the defence); after every reboot the broker stays down until a person
+types it (availability); no TPM sealing, no network unlock; XTS still gives no integrity.
+
+**Growth of the trusted base in v0.6.0 by NEXT-1 (ADR-330 to ADR-334), IPv6:** no new crate, no new `unsafe`, no
+third-party code. Own code, all of it facing the network: `net/src/ipv6.rs` (the header, extension headers,
+ICMPv6), `net/src/nd.rs` (Neighbour Discovery, SLAAC, DAD, MLD answers) and `net/src/addr.rs` (the one address
+type), about 1 850 lines without tests; about 140 more in `net/src/iface.rs` and the IPv6 4-tuple in
+`net/src/rss.rs`; the address type and the pseudo-header by family in `tcp` (about 90 lines more); the per-core
+loops in `kernel/src/netproto.rs` (about 190 more); IPv6 networks in `cfg/src/net.rs` (about 280 more) and the
+/64 key in `plain/src/{allow,sources}.rs`. Remote input: every frame from the link (the table row in §2); the
+steering classifier parses IPv6 frames **even with IPv6 off**, before the interface drops them. **Off by default**
+(`network.ipv6 = "off"`); turned on, every listener (TLS, WebSocket, plaintext, metrics) takes IPv6 clients too.
+Residual risk: Neighbour Discovery is unauthenticated (no SEND or RA guard, as ARP): any node on the link can
+advertise a router, a prefix or an MTU down to 1280, or claim our address in DAD so it is never used (`static` on a
+shared segment); per-address limits count a /64 as one source, so devices behind one /64 share them; fragments are
+dropped, not reassembled.
 
 **Growth of the trusted base in v0.6.0 by NOW-18 (ADR-335 to ADR-339), the kernel as a library:** no new crate, no
 new dependency, one new `unsafe` site (above). The kernel crate is now a library plus the open image's binary
@@ -158,7 +280,7 @@ its drivers run in kernel mode with the same privileges as the open drivers; the
 off virtio functions and keep their keys in their range (ADR-336, ADR-337).
 
 `mqtt`, `broker`, `tls`, `timer-wheel`, `cfg`, `config-schema`, `control`,
-`plain`, `sntp` and `dispatch` are `forbid(unsafe_code)`. `tcp`, `net`, `pci`,
+`plain`, `ws`, `http`, `sntp` and `dispatch` are `forbid(unsafe_code)`. `tcp`, `net`, `pci`,
 `platform`, `diag`, `iommu` and the `arch` facade are `deny` and contain none. A new
 `unsafe` site without a `// SAFETY:` comment shows up in the generated
 inventory as **no**; the CI check fails on a stale inventory, and the count
