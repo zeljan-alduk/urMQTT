@@ -46,7 +46,7 @@ Alpha means: fit for trials and pilots whose operator reads this document, not f
 
 | Issue | What it means for you | Workaround | Tracking |
 |---|---|---|---|
-| **IPv4 only.** | No IPv6 listener, no SLAAC. | An IPv4 address on the VM. | ROADMAP NEXT-1 |
+| **IPv6 is basic** (since NEXT-1): one global address, no fragment reassembly, no ICMPv6 errors or path MTU discovery, no DHCPv6; SNTP, syslog, statsd and log shipping are IPv4 only; `plaintext.ip_identities` holds IPv4 networks only. | A second advertised prefix is ignored; a path with an MTU below the router's loses large segments; an IPv6 client of a plaintext listener with `auth = "ip"` is refused. | The router's MTU option or `network.mtu`; IPv4 collectors; `auth = "password"` for IPv6 clients. | ADR-333 |
 | **The MTU: up to v0.4.1 assumed to be 1500 bytes.** Fixed in v0.4.2 (DHCP option 26 and `network.mtu`, ADR-264), tested under QEMU only (smoke group `net_mtu`); nothing has run on Google Cloud. | On a network with a smaller MTU (Google Cloud's default network: 1460) v0.4.1 and older lose large segments without an error. | v0.4.2; with a static address, set `network.mtu` (configuration format 7, read by v0.4.2 and newer only). | ROADMAP NOW-19 |
 | **No DNS.** | SNTP servers and collectors are IPv4 literals. | Give addresses, not names. | ROADMAP NEXT-10 |
 | **Many VPS providers run no DHCP for a custom ISO.** | With `network.mode = "dhcp"` the broker gets no address. | `"static"` with the provider's values, or `"auto"` (DHCP first, then static). | [DEPLOY.md](DEPLOY.md), README "Configuring the network of a VPS" |

@@ -3569,6 +3569,155 @@ metrics() {
     done
 }
 
+# NEXT-1, ADR-330 to ADR-334: IPv6. Three images, each on this architecture's accelerators:
+# - ipv6-slirp: dual stack on QEMU's own user network (--net6 dual): SLAAC from QEMU's Router
+#   Advertisements (fec0::/64, router fe80::2) beside the DHCP lease; the $SYS topics, read over IPv4,
+#   name the IPv6 addresses.
+# - ipv6-only: no IPv4 at all (no DHCP server), the link is scripts/ipv6-relay.py on a dgram netdev: SLAAC
+#   from its RA (2001:db8:1::/64, MTU 1480), then an mTLS publish and subscribe over IPv6 (mosquitto through
+#   the relay), an echo answered, a fragment and an extension header that must not be skipped dropped and
+#   counted, a Neighbour Solicitation from off the link ignored.
+# - ipv6-static: dual stack through the relay, static IPv4 and static IPv6 (2001:db8:5::10/64, gateway
+#   fe80::1, RAs ignored): a message published over IPv4 reaches a subscriber over IPv6, and the metrics
+#   endpoint answers an IPv6 scrape from the IPv6 network its allow_from lists and nothing over IPv4.
+ipv6_suite() {
+    if ! command -v mosquitto_pub >/dev/null || ! command -v mosquitto_sub >/dev/null || ! command -v curl >/dev/null; then
+        echo "  ✗ the ipv6 scenarios need the mosquitto clients and curl"; FAILED=$((FAILED + 1)); return 0
+    fi
+    local dir="$OUT/ipv6" tool="$ROOT/target/debug/urmqtt-config" d="$ROOT/deploy/dev"
+    mkdir -p "$dir"
+    (cd "$ROOT" && cargo build -q --locked -p urmqtt-config-tool) || { echo "  ✗ urmqtt-config build failed"; FAILED=$((FAILED + 1)); return 0; }
+    local base="$dir/base.toml"
+    sed -e 's/^mqtt_plain_port = 1883 .*/mqtt_plain_port = 0/' "$d/config.toml" >"$base"
+    # mk6 <name> <lines after [network]> [more TOML] [sed expression on the base]
+    mk6() {
+        local name=$1 net=$2 toml_tail=${3:-} edit=${4:-}
+        { sed -e "s|^\[network\]\$|[network]\n$net|" ${edit:+-e "$edit"} "$base"; [[ -n $toml_tail ]] && printf '\n%s\n' "$toml_tail"; } >"$dir/$name.toml"
+        "$tool" pack "$dir/$name.toml" --env dev --root "$d" --out "$dir/$name.blob" >/dev/null
+        MKIMG_EXTRA=(--config "$dir/$name.blob")
+        mkimg "$OUT/ipv6-$name.raw" "serve log=info"
+        MKIMG_EXTRA=()
+    }
+    mk6 slirp 'ipv6 = "slaac"'
+    mk6 only 'ipv6 = "slaac"'
+    # Static IPv6 and, since the relay serves no DHCP, static IPv4.
+    mk6 static 'ipv6 = "static"\nipv6_address = "2001:db8:5::10/64"\nipv6_gateway = "fe80::1"' \
+        "$(printf '[metrics]\nenabled = true\nallow_from = ["2001:db8:5::/64"]')" \
+        's|^mode = "dhcp".*|mode = "static"\naddress = "10.0.2.15/24"\ngateway = "10.0.2.2"|'
+    local mac=5054:ff:fe12:3456 common=("^URMQTT READY$" "NOT:client: .* FAILED" "$NO_FAULT" "NOT:panicked")
+    local p4=$((PORT + 40)) p6=$((PORT + 41)) p6b=$((PORT + 42)) pm6=$((PORT + 43)) pm4=$((PORT + 44)) n=0
+    pub() { # pub <port> <id> <topic> <message>
+        mosquitto_pub -h 127.0.0.1 -p "$1" -V mqttv311 -i "$2" --cafile "$d/ca.pem" --cert "$d/devices/$2.pem" \
+            --key "$d/devices/$2.key" -t "$3" -m "$4" -q 1
+    }
+    # sub_as <identity> <port> <count> <seconds> <topic...>: a subscription of a service (backend: devices/#)
+    # or the operator ($SYS); prints what came, never fails (the checks grep it). $SYS is refreshed every
+    # 10 s, so a reader of the IPv6 topics waits 13 s for the values after the addresses came up.
+    sub_as() {
+        local who=$1 port=$2 count=$3 secs=$4 args=()
+        shift 4
+        for t in "$@"; do args+=(-t "$t"); done
+        mosquitto_sub -h 127.0.0.1 -p "$port" -V mqttv311 -i "$who" --cafile "$d/ca.pem" --cert "$d/services/$who.pem" \
+            --key "$d/services/$who.key" "${args[@]}" -C "$count" -W "$secs" -v || true
+    }
+    for accel in $ACCELS; do
+        # Dual stack on QEMU's user network.
+        local log="$OUT/ipv6-slirp-$accel.log" data="$OUT/ipv6-slirp-$accel.img" status=0
+        fresh_disk "$OUT/ipv6-slirp.raw" "$data"
+        start_vm "$log" --disk "$data" --accel "$accel" --net6 dual --fwd "$p4:8883"
+        if wait_log "$log" "net: ipv6 global address fec0::$mac in use" && wait_log "$log" "net: dhcp lease 10\.0\.2\.15"; then
+            # shellcheck disable=SC2016  # the topics' $SYS is literal
+            sub_as operator "$p4" 99 13 '$SYS/broker/net/ipv6/address/global' '$SYS/broker/net/ipv6/router' \
+                '$SYS/broker/net/ipv6/mode' >"$log.client" 2>&1
+        else
+            status=124
+        fi
+        kill_vm
+        cat "$log.client" >>"$log" 2>/dev/null || true
+        check "ipv6-slirp [$accel]" "$log" "$status" "${common[@]}" \
+            "net: ipv6 slaac: link-local address fe80::$mac \(EUI-64\)" \
+            "net: ipv6 link-local address fe80::$mac in use \(duplicate address detection passed\)" \
+            "net: ipv6 default router fe80::2" \
+            "^\\\$SYS/broker/net/ipv6/address/global fec0::$mac$" "^\\\$SYS/broker/net/ipv6/router fe80::2$" \
+            "^\\\$SYS/broker/net/ipv6/mode slaac$"
+
+        # IPv6 only, through the relay.
+        local lp=$((46000 + n * 2)) rp=$((46001 + n * 2)); n=$((n + 1))
+        log="$OUT/ipv6-only-$accel.log"; data="$OUT/ipv6-only-$accel.img"; status=0
+        fresh_disk "$OUT/ipv6-only.raw" "$data"
+        python3 -I "$ROOT/scripts/ipv6-relay.py" --local "$rp" --remote "$lp" --guest6 "2001:db8:1::$mac" --prefix 2001:db8:1:: \
+            --mtu 1480 --listen "6:$p6:8883" --listen "6:$p6b:8883" --probe --seconds 600 >"$log.relay" 2>&1 &
+        local rpid=$!
+        start_vm "$log" --disk "$data" --accel "$accel" --dgram "$lp:$rp"
+        if wait_log "$log" "net: ipv6 global address 2001:db8:1:0:$mac in use" && sleep 4; then
+            {
+                sub_as backend "$p6" 1 30 'devices/device-001/v6' >"$log.sub" 2>&1 &
+                local spid=$!
+                sleep 3
+                pub "$p6b" device-001 devices/device-001/v6 "over ipv6" && echo "client: ipv6-publish ok" || echo "client: ipv6-publish FAILED"
+                wait "$spid"; grep -q "^devices/device-001/v6 over ipv6$" "$log.sub" \
+                    && echo "client: ipv6-subscribe-received ok" || echo "client: ipv6-subscribe-received FAILED"
+                cat "$log.sub"
+                # shellcheck disable=SC2016  # the topics' $SYS is literal
+                sub_as operator "$p6" 99 13 '$SYS/broker/net/ipv6/fragments' '$SYS/broker/net/ipv6/ext_headers' \
+                    '$SYS/broker/net/ipv6/mtu'
+            } >"$log.client" 2>&1
+        else
+            status=124
+        fi
+        kill_vm
+        kill "$rpid" 2>/dev/null || true
+        wait "$rpid" 2>/dev/null || true
+        cat "$log.client" "$log.relay" >>"$log" 2>/dev/null || true
+        check "ipv6-only [$accel]" "$log" "$status" "${common[@]}" \
+            "net: ipv6 default router fe80::1 \(lifetime 1800 s\)" "net: ipv6 mtu 1480 \(router advertisement\)" \
+            "NOT:net: dhcp lease" "relay: flow [0-9]+: connected to the guest over IPv6, its MSS 1420" \
+            "relay: echo reply from 2001:db8:1:0:$mac" "relay: MLD report" \
+            "client: ipv6-publish ok" "client: ipv6-subscribe-received ok" \
+            "^\\\$SYS/broker/net/ipv6/fragments [1-9]" "^\\\$SYS/broker/net/ipv6/ext_headers [1-9]" "^\\\$SYS/broker/net/ipv6/mtu 1480$"
+
+        # Dual stack through the relay, both addresses static; the metrics endpoint for an IPv6 network.
+        lp=$((46000 + n * 2)); rp=$((46001 + n * 2)); n=$((n + 1))
+        log="$OUT/ipv6-static-$accel.log"; data="$OUT/ipv6-static-$accel.img"; status=0
+        fresh_disk "$OUT/ipv6-static.raw" "$data"
+        python3 -I "$ROOT/scripts/ipv6-relay.py" --local "$rp" --remote "$lp" --guest6 2001:db8:5::10 --guest4 10.0.2.15 \
+            --router6 2001:db8:5::1 --listen "4:$p4:8883" --listen "6:$p6:8883" --listen "6:$pm6:9100" --listen "4:$pm4:9100" \
+            --seconds 600 >"$log.relay" 2>&1 &
+        rpid=$!
+        start_vm "$log" --disk "$data" --accel "$accel" --dgram "$lp:$rp"
+        if wait_log "$log" "net: ipv6 global address 2001:db8:5::10 in use" && sleep 2; then
+            {
+                sub_as backend "$p6" 1 30 'devices/device-002/cross' >"$log.sub" 2>&1 &
+                local spid=$!
+                sleep 3
+                pub "$p4" device-002 devices/device-002/cross "from ipv4" && echo "client: ipv4-publish ok" || echo "client: ipv4-publish FAILED"
+                wait "$spid"; grep -q "^devices/device-002/cross from ipv4$" "$log.sub" \
+                    && echo "client: ipv4-to-ipv6-delivery ok" || echo "client: ipv4-to-ipv6-delivery FAILED"
+                curl -s --max-time 10 "http://127.0.0.1:$pm6/metrics" >"$log.metrics" \
+                    && grep -q '^urmqtt_ipv6_mode_info{mode="static"} 1$' "$log.metrics" \
+                    && echo "client: metrics-over-ipv6 ok" || echo "client: metrics-over-ipv6 FAILED"
+                if curl -s --max-time 5 "http://127.0.0.1:$pm4/metrics" >/dev/null; then
+                    echo "client: metrics-over-ipv4-refused FAILED"
+                else
+                    echo "client: metrics-over-ipv4-refused ok"
+                fi
+            } >"$log.client" 2>&1
+        else
+            status=124
+        fi
+        kill_vm
+        kill "$rpid" 2>/dev/null || true
+        wait "$rpid" 2>/dev/null || true
+        cat "$log.client" "$log.relay" >>"$log" 2>/dev/null || true
+        check "ipv6-static [$accel]" "$log" "$status" "${common[@]}" \
+            "net: ipv6 static: 2001:db8:5::10/64 gateway fe80::1, link-local fe80::$mac" \
+            "net: static address 10\.0\.2\.15/24" "scrapes allowed from 2001:db8:5::/64" \
+            "relay: flow [0-9]+: connected to the guest over IPv4" "relay: flow [0-9]+: connected to the guest over IPv6, its MSS 1440" \
+            "client: ipv4-publish ok" "client: ipv4-to-ipv6-delivery ok" "client: metrics-over-ipv6 ok" "client: metrics-over-ipv4-refused ok" \
+            "metrics: [0-9]+ SYN\(s\) from addresses outside metrics\.allow_from dropped without an answer"
+    done
+}
+
 # NOW-13, ADR-270: the NIC's receive interrupt. The serving image with the default configuration says which
 # wake-up its dispatcher uses (the MSI-X interrupt: GICv2m under HVF and on a GICv2, the GICv3 ITS under TCG,
 # the local APIC on x86) and carries MQTT
@@ -5617,6 +5766,15 @@ if [[ ${SMOKE_ONLY:-} == misc && $ARCH != universal ]]; then
     want virtio_gpu && virtio_gpu
     want virtio_devices && virtio_devices
     want iommu_suite && iommu_suite
+    echo "smoke: $PASSED passed, $FAILED failed"
+    [[ $FAILED -eq 0 ]]
+    exit
+fi
+
+# SMOKE_ONLY=ipv6: IPv6 (NEXT-1, ADR-330 to ADR-334) on this architecture: SLAAC on QEMU's user network, IPv6 only
+# and dual stack through scripts/ipv6-relay.py.
+if [[ ${SMOKE_ONLY:-} == ipv6 && $ARCH != universal ]]; then
+    ipv6_suite
     echo "smoke: $PASSED passed, $FAILED failed"
     [[ $FAILED -eq 0 ]]
     exit

@@ -215,7 +215,7 @@ fn structural_attacks_fail_closed() {
     assert!(Blob::parse(&assemble(&over)).is_err());
     // A version this code does not know (0, 10 which no format ever used, and
     // one above the newest).
-    for unknown in [0u8, 10, 21, 23] {
+    for unknown in [0u8, 10, 21, 24] {
         let v = with_version(&assemble(&ok), unknown);
         assert!(Blob::parse(&v).is_err(), "version {unknown}");
     }
@@ -223,9 +223,9 @@ fn structural_attacks_fail_closed() {
     // (8 back-pressure, 9 WebSocket, 11 the receive interrupt, 12 MQTT 5.0,
     // 13 the shared-group limits, 14 the per-address connection limit, 15 the run-time
     // account limit, 16 the metrics endpoint, 17 the A/B update keys, 18 the IOMMU,
-    // 19 the NIC's queue pairs, 20 log shipping over TLS, 22 the disk key source; 21 was reserved for LATER-6, which
-    // needed no key).
-    for known in [8u8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22] {
+    // 19 the NIC's queue pairs, 20 log shipping over TLS, 22 the disk key source, 23 IPv6; 21 was reserved for
+    // LATER-6, which needed no key).
+    for known in [8u8, 9, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 23] {
         let v = with_version(&assemble(&ok), known);
         assert_eq!(Blob::parse(&v).map(|b| b.version()), Ok(u16::from(known)));
     }
@@ -247,7 +247,7 @@ fn with_version(blob: &[u8], version: u8) -> Vec<u8> {
 /// version 2, so it keeps meaning exactly what it meant.
 #[test]
 fn format_2_is_written_and_format_1_is_still_read() {
-    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 22));
+    assert_eq!((blob::FORMAT_MIN, blob::FORMAT_VERSION), (1, 23));
     // What the builder and the built-in default write.
     let e = empty();
     assert_eq!(Blob::parse(&e).unwrap().version(), 2);
@@ -256,7 +256,7 @@ fn format_2_is_written_and_format_1_is_still_read() {
     blob::write_empty(&mut buf);
     assert_eq!(
         &buf[8..10],
-        &[22, 0],
+        &[23, 0],
         "the built-in empty slot declares the newest format this kernel reads"
     );
     // A version 1 blob made by the previous release's tool: the same records,
@@ -1715,4 +1715,113 @@ fn dns_names() {
     ] {
         assert!(!check::valid_dns_name(bad), "{bad}");
     }
+}
+
+/// NEXT-1, ADR-334: `network.ipv6*` came with format 23. "off" (the default)
+/// writes nothing, so every existing configuration keeps its version; slaac
+/// and static need 23, which an older kernel refuses by the version. An IPv6
+/// network in an allow-list needs 23 too (the key is older than the value).
+#[test]
+fn ipv6_needs_format_23_and_off_writes_nothing() {
+    use crate::fields::IPV6_MODES;
+    for (key, t) in [
+        ("network.ipv6", tag::NET_IPV6),
+        ("network.ipv6_address", tag::NET_IPV6_ADDRESS),
+        ("network.ipv6_gateway", tag::NET_IPV6_GATEWAY),
+    ] {
+        let f = crate::fields::by_key(key).unwrap();
+        assert_eq!((f.tag, f.since, f.dev_only), (t, 23, false), "{key}");
+    }
+    assert_eq!(IPV6_MODES, ["off", "slaac", "static"]);
+    let mut off = Builder::new();
+    off.variant(tag::NET_IPV6, 0).unwrap();
+    assert_eq!(off.lowest_version(), 2);
+    assert_eq!(off.finish(false).unwrap(), empty());
+    let mut slaac = Builder::new();
+    slaac.variant(tag::NET_IPV6, 1).unwrap();
+    assert_eq!(slaac.lowest_version(), 23);
+    assert!(slaac.finish_as(false, 22).is_err());
+    let blob = slaac.finish(false).unwrap();
+    let p = Blob::parse(&blob).unwrap();
+    assert_eq!((p.version(), p.variant(tag::NET_IPV6)), (23, 1));
+    check::check(&p, false).unwrap();
+    assert!(Blob::parse(&with_version(&blob, 22)).is_err());
+    assert!(Builder::new().variant(tag::NET_IPV6, 3).is_err());
+    // static: both keys, the gateway on the link.
+    let st = |addr: &str, gw: &str| {
+        let mut b = Builder::new();
+        b.variant(tag::NET_IPV6, 2).unwrap();
+        if !addr.is_empty() {
+            b.str(tag::NET_IPV6_ADDRESS, addr).unwrap();
+        }
+        if !gw.is_empty() {
+            b.str(tag::NET_IPV6_GATEWAY, gw).unwrap();
+        }
+        // `finish` runs the kernel's check.
+        let blob = b.finish(false).map_err(|e| e.key)?;
+        let p = Blob::parse(&blob).unwrap();
+        assert_eq!(p.version(), 23);
+        check::check(&p, false).map_err(|e| e.key)
+    };
+    assert_eq!(st("2001:db8:1::10/64", "fe80::1"), Ok(()));
+    assert_eq!(st("2001:db8:1::10/64", "2001:db8:1::1"), Ok(()));
+    assert_eq!(
+        st("2001:db8:1::10/64", "2001:db8:2::1"),
+        Err("network.ipv6_gateway")
+    );
+    assert_eq!(
+        st("2001:db8:1::10/64", "2001:db8:1::10"),
+        Err("network.ipv6_gateway")
+    );
+    assert_eq!(st("2001:db8:1::10/64", ""), Err("network.ipv6_gateway"));
+    assert_eq!(st("", "fe80::1"), Err("network.ipv6_address"));
+    assert_eq!(st("fe80::10/64", "fe80::1"), Err("network.ipv6_address"));
+    assert_eq!(st("2001:db8:1::10", "fe80::1"), Err("network.ipv6_address"));
+    assert_eq!(
+        st("2001:db8:1::10/64", "ff02::1"),
+        Err("network.ipv6_gateway")
+    );
+    // An address without static mode.
+    let mut b = Builder::new();
+    b.variant(tag::NET_IPV6, 1).unwrap();
+    b.str(tag::NET_IPV6_ADDRESS, "2001:db8:1::10/64").unwrap();
+    assert_eq!(b.finish(false).map_err(|e| e.key), Err("network.ipv6"));
+}
+
+/// ADR-334: an IPv6 network in an allow-list lifts the format to 23; the
+/// same network written twice in different text is a duplicate; a blob of an
+/// older format that holds one is refused by the check.
+#[test]
+fn ipv6_networks_in_allow_lists_need_format_23() {
+    let mut b = Builder::new();
+    b.strs(tag::METRICS_ALLOW_FROM, &["10.0.0.0/8".to_string()])
+        .unwrap();
+    assert!(b.lowest_version() < 23);
+    let mut b = Builder::new();
+    b.strs(
+        tag::METRICS_ALLOW_FROM,
+        &["10.0.0.0/8".to_string(), "2001:db8::/32".to_string()],
+    )
+    .unwrap();
+    assert_eq!(b.lowest_version(), 23);
+    assert!(b.finish_as(false, 22).is_err());
+    let blob = b.finish(false).unwrap();
+    check::check(&Blob::parse(&blob).unwrap(), false).unwrap();
+    let mut d = Builder::new();
+    d.strs(
+        tag::METRICS_ALLOW_FROM,
+        &["2001:db8::/32".to_string(), "2001:DB8:0::/32".to_string()],
+    )
+    .unwrap();
+    let e = d.finish(false).unwrap_err();
+    assert!(e.msg.contains("twice"), "{e:?}");
+    // A format 22 blob carrying one (not what a packer writes): refused.
+    let mut v = Builder::new();
+    v.strs(tag::PL_ALLOW_FROM, &["2001:db8::/32".to_string()])
+        .unwrap();
+    let blob = v.finish(false).unwrap();
+    let old = with_version(&blob, 22);
+    let p = Blob::parse(&old).unwrap();
+    let e = check::check(&p, false).unwrap_err();
+    assert!(e.msg.contains("format 23"), "{e:?}");
 }

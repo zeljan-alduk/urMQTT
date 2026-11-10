@@ -145,7 +145,7 @@ fuzz_target!(|input: &[u8]| {
             0 => {
                 if conn.is_none_or(|c| app.closed.contains(&c)) {
                     let remote = Endpoint {
-                        addr: PEER,
+                        addr: PEER.into(),
                         port: SINK,
                     };
                     if let Some(p) = s.ephemeral_port(remote, |p| p % 3 == 0) {

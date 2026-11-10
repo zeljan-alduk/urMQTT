@@ -53,6 +53,11 @@ pub const RSS_TABLE_LEN: usize = 128;
 pub const RSS_KEY_LEN: usize = 40;
 /// `VIRTIO_NET_RSS_HASH_TYPE_TCPv4`: the 4-tuple of TCP over IPv4.
 pub const HASH_TCPV4: u32 = 1 << 1;
+/// `VIRTIO_NET_RSS_HASH_TYPE_TCPv6`: the 4-tuple of TCP over IPv6, the
+/// addresses of the IPv6 header (NEXT-1, ADR-333). Asked for only where the
+/// device offers it; without it IPv6 flows arrive on pair 0 and core 0
+/// steers them by the same hash.
+pub const HASH_TCPV6: u32 = 1 << 4;
 
 // Device configuration (§5.1.4).
 const CFG_STATUS: usize = 6;
@@ -162,13 +167,15 @@ pub fn plan(accepted: u64, limits: DeviceLimits, want: usize) -> Result<usize, S
     Ok(want.min(MAX_PAIRS).min(usize::from(limits.max_pairs)))
 }
 
-/// The `VIRTIO_NET_CTRL_MQ_RSS_CONFIG` command (§5.1.6.5.7.1): TCP/IPv4
-/// hashing only, `table` (queue per entry), unclassified frames to queue 0,
-/// `pairs` transmit queues, and `key`.
+/// The `VIRTIO_NET_CTRL_MQ_RSS_CONFIG` command (§5.1.6.5.7.1): `hash_types`
+/// (TCP/IPv4, and TCP/IPv6 where the device offers it), `table` (queue per
+/// entry), unclassified frames to queue 0, `pairs` transmit queues, and
+/// `key`.
 pub fn rss_command(
     table: &[u16; RSS_TABLE_LEN],
     pairs: u16,
     key: &[u8; RSS_KEY_LEN],
+    hash_types: u32,
 ) -> [u8; RSS_COMMAND_LEN] {
     let mut c = [0u8; RSS_COMMAND_LEN];
     let mut at = 0usize;
@@ -179,7 +186,7 @@ pub fn rss_command(
         at += bytes.len();
     };
     put(&[CTRL_CLASS_MQ, CTRL_MQ_RSS_CONFIG]);
-    put(&HASH_TCPV4.to_le_bytes());
+    put(&hash_types.to_le_bytes());
     put(&((RSS_TABLE_LEN - 1) as u16).to_le_bytes());
     // unclassified_queue: ARP, ICMP, UDP (DHCP, SNTP) go to core 0.
     put(&0u16.to_le_bytes());
@@ -614,7 +621,10 @@ impl<B: Bus> VirtioNet<B> {
         let Some(cmd) = self.cmd else {
             return Err(self.fail(Single::NotAsked));
         };
-        let bytes = rss_command(table, active, key);
+        // TCP/IPv4 always (the plan required it); TCP/IPv6 where offered
+        // (§5.1.6.5.7.1: never a type the device does not support).
+        let types = HASH_TCPV4 | (self.limits.hash_types & HASH_TCPV6);
+        let bytes = rss_command(table, active, key, types);
         let ack_off = CTRL_ACK_OFF;
         // A value the device must overwrite: an answer that is not written
         // counts as a refusal.

@@ -43,10 +43,13 @@ pub const MAGIC: [u8; 8] = *b"URMQCFG\0";
 /// `observability.log_tls*` keys (ADR-318: a kernel that does not know them would not ship the log where the operator
 /// asked, without a word); version 22 adds `storage.disk_key_source` (ADR-328: a kernel that does not know it would find
 /// no key and refuse the disk, or worse, an operator would believe the key is not in the image when an older template
-/// put one there; 21 was reserved for LATER-6, which needed no key, and no format has it). The records of 2 and 3 are
+/// put one there; 21 was reserved for LATER-6, which needed no key, and no format has it); version 23 adds
+/// `network.ipv6`, `network.ipv6_address`, `network.ipv6_gateway` and IPv6 networks in `plaintext.allow_from` and
+/// `metrics.allow_from` (ADR-334: a kernel that does not know them would stay IPv4-only, or refuse an allow-list it
+/// cannot read, without saying why). The records of 2 and 3 are
 /// the same: the packer writes the lowest version that can hold the configuration ([`BASE_VERSION`]), so a kernel of
 /// the older kind still boots every image that does not use what came later.
-pub const FORMAT_VERSION: u16 = 22;
+pub const FORMAT_VERSION: u16 = 23;
 
 /// The one version between [`FORMAT_MIN`] and [`FORMAT_VERSION`] no format ever had.
 pub const UNUSED_VERSION: u16 = 10;

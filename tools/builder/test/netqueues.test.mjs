@@ -8,7 +8,7 @@ import test from 'node:test';
 
 import { buildModel, buildToml, changedIds, decodeHash, emptyState, encodeHash, importToml } from '../web/src/core.js';
 import { loadBuilder } from '../web/src/wasm.js';
-import { WASM, haveWasm } from './helpers.mjs';
+import { FORMAT, WASM, haveWasm } from './helpers.mjs';
 
 if (!haveWasm()) {
   console.log(`skipped: needs ${WASM} (make builder)`);
@@ -23,7 +23,7 @@ const version = blob => blob[8] | (blob[9] << 8);
 const ID = 'devices.virtio_net_queues';
 
 test('the key is in [devices], auto by default, the only key of format 19', () => {
-  assert.equal(model.formatVersion, 22);
+  assert.equal(model.formatVersion, FORMAT);
   const devices = model.sections.find(s => s.id === 'devices').fields.map(f => f.id);
   assert.ok(devices.includes(ID));
   const f = model.byId.get(ID);

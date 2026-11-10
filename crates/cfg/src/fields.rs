@@ -340,6 +340,11 @@ pub mod tag {
     // A disk key that is not in the image (LATER-7, ADR-328): format
     // version 22, a tag apart from the other v0.6.0 items.
     pub const ST_DISK_KEY_SOURCE: u16 = 365;
+    // IPv6 (NEXT-1, ADR-334): format version 23, tags apart from the other
+    // v0.6.0 items.
+    pub const NET_IPV6: u16 = 410;
+    pub const NET_IPV6_ADDRESS: u16 = 411;
+    pub const NET_IPV6_GATEWAY: u16 = 412;
 }
 
 use tag as t;
@@ -388,6 +393,9 @@ pub const NET_INTERRUPT_MODES: &[&str] = &["auto", "off"];
 /// ADR-313): one per data core where the device steers flows itself (RSS), or
 /// always one. The first is the default.
 pub const NET_QUEUE_MODES: &[&str] = &["auto", "single"];
+/// IPv6 (`network.ipv6`, ADR-334): off, addresses from Router
+/// Advertisements, or a configured one. The first is the default.
+pub const IPV6_MODES: &[&str] = &["off", "slaac", "static"];
 /// DMA remapping (`devices.iommu`, ADR-305); the first is the default.
 pub const IOMMU_MODES: &[&str] = &["off", "auto", "require"];
 /// The `[devices]` keys, one per optional virtio driver (ADR-257): tag, key
@@ -1667,6 +1675,43 @@ pub static FIELDS: &[Field] = &[
             "How many receive/transmit queue pairs the virtio-net NIC uses. auto (the default): one per data core when the device offers multiqueue with RSS (VIRTIO_NET_F_MQ and VIRTIO_NET_F_RSS, e.g. QEMU's virtio-net-pci with mq=on,rss=on on a multi-queue tap), so each core receives and sends its own flows and core 0 stops copying every frame; otherwise one pair, as before. single: always one pair (the dispatcher on core 0 steers every frame), for a host whose multiqueue misbehaves. Format 19.",
         ),
         19,
+    ),
+    // network, continued: IPv6 (NEXT-1, ADR-334), format version 23.
+    since(
+        f(
+            t::NET_IPV6,
+            "network.ipv6",
+            Kind::Enum {
+                variants: IPV6_MODES,
+                default: 0,
+            },
+            "IPv6 beside IPv4. off (the default): IPv6 frames are dropped and nothing listens on IPv6. slaac: the link-local address and one global address from the Router Advertisements (the first /64 with the A flag; interface identifier from the MAC, EUI-64), the default router and the MTU from them. static: network.ipv6_address and network.ipv6_gateway. Every listener (TLS, WebSocket, plaintext, metrics) then also takes IPv6 clients; the per-address limits count an IPv6 /64 as one address. Format 23.",
+        ),
+        23,
+    ),
+    since(
+        f(
+            t::NET_IPV6_ADDRESS,
+            "network.ipv6_address",
+            Kind::Str {
+                max: 64,
+                default: "",
+            },
+            "The IPv6 address with the length of its on-link prefix, e.g. 2001:db8:1::10/64; required with network.ipv6 = \"static\", not allowed otherwise. A global unicast address (the link-local one is made from the MAC). Format 23.",
+        ),
+        23,
+    ),
+    since(
+        f(
+            t::NET_IPV6_GATEWAY,
+            "network.ipv6_gateway",
+            Kind::Str {
+                max: 64,
+                default: "",
+            },
+            "The IPv6 default router, e.g. fe80::1 (link-local, what most VPS providers give) or an address within network.ipv6_address's prefix; required with network.ipv6 = \"static\", not allowed otherwise. Format 23.",
+        ),
+        23,
     ),
     // Log shipping over TLS (NEXT-7, ADR-318): format version 20.
     since(

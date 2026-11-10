@@ -1779,6 +1779,7 @@ dependencies = [
  "proptest",
  "proptest-state-machine",
  "urmqtt-mm",
+ "urmqtt-net",
  "urmqtt-timer-wheel",
 ]
 

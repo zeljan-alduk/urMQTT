@@ -89,8 +89,7 @@ impl TlsLink {
             _ => "the trust anchors are unusable",
         })?;
         let name = if name.is_empty() {
-            let a = dst.addr;
-            alloc::format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3])
+            alloc::format!("{}", dst.addr)
         } else {
             String::from(name)
         };
@@ -175,8 +174,9 @@ impl TlsLink {
     }
 
     fn addr(&self) -> String {
-        let a = self.dst.addr;
-        alloc::format!("{}.{}.{}.{}:{}", a[0], a[1], a[2], a[3], self.dst.port)
+        // The outbound client is IPv4 only (ADR-319); an IPv6 one would need
+        // brackets around the address.
+        alloc::format!("{}:{}", self.dst.addr, self.dst.port)
     }
 
     fn retry_note(&self, now_ms: u64) -> String {
@@ -227,11 +227,13 @@ impl TlsLink {
             return;
         }
         self.waiting_clock = false;
-        let reachable = iface.addr().is_some() && iface.can_reach(self.dst.addr);
+        // IPv4 only (ADR-319): the configuration holds an IPv4 address.
+        let v4 = self.dst.addr.as_v4().unwrap_or([0; 4]);
+        let reachable = iface.addr().is_some() && iface.can_reach(v4);
         match self.dialer.poll(now_ms, reachable) {
             Action::None => {}
             Action::Resolve => {
-                if let Some(hop) = iface.next_hop(self.dst.addr)
+                if let Some(hop) = iface.next_hop(v4)
                     && iface.addr().is_some()
                 {
                     iface.resolve(hop, emit);

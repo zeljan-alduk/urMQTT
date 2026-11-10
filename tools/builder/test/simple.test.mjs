@@ -139,9 +139,14 @@ test('switching to advanced shows the same values, and back loses nothing', asyn
   // The release list moved with it.
   assert.equal(await page.eval(`Boolean(document.querySelector('.ub-advanced .ub-release'))`), true);
   // Search and the changed filter.
+  // Several settings say "gateway" since IPv6 (ADR-334): IPv4's gateway is
+  // among them, every one shown says it, and the others are filtered out.
   await page.type('#ub-search', 'gateway');
-  await page.waitFor(`document.querySelectorAll('.ub-field:not([data-filtered]):not([hidden])').length === 1`);
-  assert.equal(await page.eval(`document.querySelector('.ub-field:not([data-filtered]):not([hidden])').dataset.id`), 'network.gateway');
+  await page.waitFor(`document.querySelector('.ub-field[data-id="network.mtu"]').hasAttribute('data-filtered')`);
+  const found = await page.eval(`[...document.querySelectorAll('.ub-field:not([data-filtered]):not([hidden])')].map(f => [f.dataset.id, (f.dataset.id + ' ' + f.textContent).toLowerCase().includes('gateway')])`);
+  assert.ok(found.some(([id]) => id === 'network.gateway'), JSON.stringify(found));
+  assert.ok(found.every(([, says]) => says), JSON.stringify(found));
+  assert.ok(found.length < 5, JSON.stringify(found));
   await page.eval(`document.querySelector('#ub-search').value = ''; document.querySelector('#ub-search').dispatchEvent(new Event('input'))`);
   await page.click('#ub-only-changed');
   await page.waitFor(`document.querySelectorAll('.ub-field:not([data-filtered]):not([hidden])').length > 0`);

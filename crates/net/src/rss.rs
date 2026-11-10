@@ -1,6 +1,8 @@
-//! Toeplitz hash (Microsoft RSS) over the IPv4 TCP 4-tuple: the same flow
-//! always lands on the same core, in software dispatch and (with the same
-//! key) when a NIC does RSS itself.
+//! Toeplitz hash (Microsoft RSS) over the TCP 4-tuple of IPv4 and IPv6: the
+//! same flow always lands on the same core, in software dispatch and (with
+//! the same key) when a NIC does RSS itself (IPv6: NEXT-1, ADR-333).
+
+use crate::addr::Addr;
 
 /// The default key from the Microsoft RSS specification (40 bytes).
 pub const DEFAULT_KEY: [u8; 40] = [
@@ -63,6 +65,26 @@ pub fn ipv4_tcp(src: [u8; 4], dst: [u8; 4], sport: u16, dport: u16) -> u32 {
     input[8..10].copy_from_slice(&sport.to_be_bytes());
     input[10..].copy_from_slice(&dport.to_be_bytes());
     toeplitz(&DEFAULT_KEY, &input)
+}
+
+/// RSS hash of an IPv6 TCP flow, as seen on receive: the addresses of the
+/// IPv6 header (not those of a Home Address option or a Routing header, the
+/// `_EX` hash types this stack never asks a device for), then the ports.
+pub fn ipv6_tcp(src: [u8; 16], dst: [u8; 16], sport: u16, dport: u16) -> u32 {
+    let mut input = [0u8; 36];
+    input[..16].copy_from_slice(&src);
+    input[16..32].copy_from_slice(&dst);
+    input[32..34].copy_from_slice(&sport.to_be_bytes());
+    input[34..].copy_from_slice(&dport.to_be_bytes());
+    toeplitz(&DEFAULT_KEY, &input)
+}
+
+/// RSS hash of a TCP flow of either family.
+pub fn tcp(src: Addr, dst: Addr, sport: u16, dport: u16) -> u32 {
+    match (src.as_v4(), dst.as_v4()) {
+        (Some(s), Some(d)) => ipv4_tcp(s, d, sport, dport),
+        _ => ipv6_tcp(src.octets(), dst.octets(), sport, dport),
+    }
 }
 
 #[cfg(test)]
@@ -197,5 +219,55 @@ mod tests {
                 "{src:?}:{sport} -> {dst:?}:{dport}"
             );
         }
+    }
+
+    /// Verification suite from the Microsoft RSS specification (IPv6 with
+    /// TCP ports): the 40-byte key covers the 36 bytes of input.
+    #[test]
+    fn microsoft_verification_suite_ipv6() {
+        fn a(g: [u16; 8]) -> [u8; 16] {
+            let mut x = [0u8; 16];
+            for (i, v) in g.iter().enumerate() {
+                x[2 * i..2 * i + 2].copy_from_slice(&v.to_be_bytes());
+            }
+            x
+        }
+        let cases = [
+            (
+                a([0x3ffe, 0x2501, 0x200, 0x1fff, 0, 0, 0, 7]),
+                2794,
+                a([0x3ffe, 0x2501, 0x200, 3, 0, 0, 0, 1]),
+                1766,
+                0x4020_7d3du32,
+            ),
+            (
+                a([0x3ffe, 0x501, 8, 0, 0x260, 0x97ff, 0xfe40, 0xefab]),
+                14230,
+                a([0xff02, 0, 0, 0, 0, 0, 0, 1]),
+                4739,
+                0xdde5_1bbf,
+            ),
+            (
+                a([0x3ffe, 0x1900, 0x4545, 3, 0x200, 0xf8ff, 0xfe21, 0x67cf]),
+                44251,
+                a([0xfe80, 0, 0, 0, 0x200, 0xf8ff, 0xfe21, 0x67cf]),
+                38024,
+                0x02d1_feef,
+            ),
+        ];
+        for (src, sport, dst, dport, want) in cases {
+            assert_eq!(ipv6_tcp(src, dst, sport, dport), want);
+            assert_eq!(tcp(Addr::v6(src), Addr::v6(dst), sport, dport), want);
+        }
+        // The family-neutral hash is the IPv4 one for IPv4 flows.
+        assert_eq!(
+            tcp(
+                Addr::v4([66, 9, 149, 187]),
+                Addr::v4([161, 142, 100, 80]),
+                2794,
+                1766
+            ),
+            0x51cc_c178
+        );
     }
 }

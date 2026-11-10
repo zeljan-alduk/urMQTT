@@ -64,7 +64,7 @@ server certificate and key; the kernel validates it again at every boot and
 refuses to serve on any problem.
 
 ```
- network ──► virtio-net ──► Ethernet/ARP/IPv4/TCP (own, SYN cookies) ──► TLS 1.3
+ network ──► virtio-net ──► Ethernet/ARP/IPv4/IPv6/TCP (own, SYN cookies) ──► TLS 1.3
           (hostile)                                                     (rustls handshake,
                                                                          own record layer)
                                                                               │
@@ -167,6 +167,8 @@ pages, ADR-305).
 |---|---|---|---|---|
 | Ethernet, ARP, IPv4 (no fragments), ICMP, UDP | network/LAN | `net/src/iface.rs`, `net/src/ipv4.rs` | frame size; ARP cache size | `net_frame` |
 | DHCP replies | LAN | `net/src/dhcp.rs` | packet size; xid match | `net_frame` (via `Iface`) |
+| IPv6 header and extension headers, ICMPv6 echo, Neighbour Discovery (NS, NA, RA), the steering classifier for IPv6 (NEXT-1, ADR-330, ADR-333; only with `network.ipv6` not `off`) | network (the classifier: always, before the interface drops what IPv6-off does not take) | `net/src/ipv6.rs`, `net/src/nd.rs`, `net/src/addr.rs` (own, `no_std`, no `unsafe`); `net/src/iface.rs`, `net/src/lib.rs` (`classify`) | frame size; at most 4 extension headers and 256 bytes, 32 options each; fragments, ESP/AH, routing with segments left dropped; ND per RFC 4861 §6.1/§7.1 (hop limit 255, options non-zero and within the message); 8 prefixes per RA; 32 neighbours; 100 ND answers/s; one global address; IPv4-mapped and zero-prefix sources refused | `ipv6_nd` (with the classifier and the text forms), `net_frame` (with SLAAC), `tcp_segment` (over IPv6) |
+| SLAAC and DAD state (Router Advertisement lifetimes, prefixes, MTU; duplicate address detection) | the link (any node that can send an RA or an NA) | `net/src/nd.rs` (`Host6`) | lifetimes per RFC 4862 §5.5.3 with the two-hour rule; MTU 1280 to the link's; events queued at most 32; a duplicate address is never used | `ipv6_nd`; `nd` host tests |
 | TCP segments and the state machine | network | `tcp/src/wire.rs`, `tcp/src/lib.rs`, `tcp/src/sack.rs` (the sender's SACK scoreboard, ADR-265) | `max_conns`, `tx_max`, window, SYN cookies, `rst_per_sec`; SACK: at most 4 blocks parsed, 8 ranges kept per connection, blocks outside `(snd_una, snd_max]` ignored | `tcp_segment` (wire + stack; sends SACK blocks since ADR-265) |
 | TLS records (application, KeyUpdate, alerts) | network | `tls/src/record.rs` (own) | 2^14+256 ciphertext, 2^14+1 inner plaintext | `tls_record`; `diff_tls_record` against rustls + ring (H2); 23 tlsfuzzer probes |
 | Session tickets (on resumption) | network | `tls/src/ticket.rs` (own) | AEAD under per-boot keys; length checked first | host tests (every bit flipped) |
@@ -238,6 +240,8 @@ scenario (`scripts/smoke.sh`), a host test or a CI job. "**none**" is a gap.
 | MQTT limits (packet, topic, subscriptions, inflight, queue, publish rate) | `mqtt/src/validate.rs`, `broker/src/lib.rs` | broker host tests; `broker_input` fuzzing | all |
 | ACL (device and service rights, device-scoped subscriptions) | `broker/src/lib.rs` | `mqtt-plain`/`mqtt-tls`: `acl-subscribe-denied`; broker host tests | all |
 | SYN cookies (SipHash, random key at boot) | `tcp/src/cookie.rs`, `netproto.rs:50-62` | tcp host tests | all |
+| IPv6 strictness (ADR-330): mapped and zero-prefix sources refused (no IPv6 peer poses as an IPv4 address), fragments and must-not-skip options dropped, ND messages from off the link refused | `net/src/ipv6.rs` (own, `no_std`, no `unsafe`) | `net` host tests, fuzz `ipv6_nd`, smoke `ipv6-only` (relay probes) | both |
+| The IPv6 source rule (ADR-331): the interface and the TCP stack answer a peer from the same address | `net/src/addr.rs` (`V6Locals`), `tcp/src/lib.rs` (`local_for`) | `net` and `tcp` host tests (`v6_tests.rs`, the scripted cases over IPv6) | both |
 | RFC 5961 checks (challenge ACK, RST/SYN in window) | `tcp/src/lib.rs` | tcp host tests (`tests.rs`) | all |
 | RST rate limit | `tcp` `rst_per_sec = 200` | tcp host tests | all |
 | Handler watchdog, stuck-core reset | `kernel/src/watchdog.rs` | `watchdog` | all |
@@ -404,6 +408,7 @@ bound. "Smoke" means a scenario in `scripts/smoke.sh`.
 | Open TCP connections | `limits.max_connections_per_core` (2 000 000, in practice the heap); SYN cookies hold no state before the handshake completes | `syn_flood_holds_no_state_and_forged_acks_are_refused`; smoke `syn-flood` (20 000 SYNs, 0 connections) |
 | Half-open and idle TLS handshakes | `limits.max_handshakes_in_flight_per_core` (256), `..._per_ip` (32), `limits.handshakes_per_core_per_sec` (2000), `memory.min_free_mb` (8); handshake timeout 10 s | `admission_limits`; smoke `storm` (3 × 3000 devices against an 8 MiB heap), slowloris in `tools/attack` |
 | Established TLS connections from one source address | `limits.max_connections_per_ip` (1024; 0 off), table of 32 768 addresses (768 KiB), the bound of one address held exactly, a full bucket lets a new address through uncounted and counted | `source_limit` tests (`thousands_from_one_address`, the model), fuzz `source_limit`, `established-flood` in `tools/attack`, smoke `conn-limit` |
+| IPv6 extension headers, Neighbour Discovery (ADR-330, ADR-331) | 4 extension headers / 256 bytes, 32 options; 8 prefixes per RA, one global address; 32 neighbours per core; 100 ND answers/s; one NS per unknown next hop per second (4 remembered); 32 queued events | `net` host tests (`nd_answers_are_rate_limited`, `router_advertisements_parse`, `extension_headers_are_walked_within_bounds`), fuzz `ipv6_nd` |
 | RST and challenge-ACK responses | `rst_per_sec` (200) and the RFC 5961 cap | `tcp` host tests; the ACK flood in `tools/attack` (`RST 600 sent (9402 rate-limited)` per core) |
 | An MQTT packet | `limits.max_packet_size` (4096; plaintext: `plaintext.max_packet_size`, 1024) | `mqtt_limits`; `mqtt_decode` fuzzing; an oversize packet closes the connection |
 | A topic name or filter | `limits.max_topic_len` (256), `limits.max_topic_levels` (16) | `mqtt_limits`; `broker_input` fuzzing |

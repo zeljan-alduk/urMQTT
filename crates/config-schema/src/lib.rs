@@ -665,6 +665,50 @@ struct RawNetwork {
     /// 0: from DHCP option 26, else 1500 (NOW-19, ADR-264).
     #[serde(default)]
     mtu: u32,
+    /// IPv6 (NEXT-1, ADR-334, format 23).
+    #[serde(default)]
+    ipv6: Ipv6Kind,
+    #[serde(default)]
+    ipv6_address: Option<String>,
+    #[serde(default)]
+    ipv6_gateway: Option<String>,
+}
+
+/// `network.ipv6` (NEXT-1, ADR-334).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ipv6Kind {
+    #[default]
+    Off,
+    Slaac,
+    Static,
+}
+
+/// IPv6 as configured (NEXT-1, ADR-334).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Ipv6Mode {
+    /// IPv6 frames are dropped (the default).
+    #[default]
+    Off,
+    /// Addresses, router and MTU from Router Advertisements.
+    Slaac,
+    /// A configured address (with its prefix length) and default router.
+    Static {
+        address: [u8; 16],
+        prefix_len: u8,
+        gateway: [u8; 16],
+    },
+}
+
+impl Ipv6Mode {
+    /// The blob's variant (an index into `urmqtt_cfg::fields::IPV6_MODES`).
+    pub const fn variant(&self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Slaac => 1,
+            Self::Static { .. } => 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -989,6 +1033,8 @@ pub struct Network {
     /// `network.mtu`: `None` takes the MTU from DHCP (option 26), else 1500;
     /// with mode `static` the value is the only source (NOW-19, ADR-264).
     pub mtu: Option<u16>,
+    /// `network.ipv6*` (NEXT-1, ADR-334, format 23).
+    pub ipv6: Ipv6Mode,
 }
 
 /// The values `network.mtu` may take besides 0 (NOW-19, ADR-264).
@@ -1539,7 +1585,7 @@ fn validate_plaintext(
             errors.push(err(key, format!("at most {max} entries")));
         }
     }
-    let mut nets: Vec<Cidr> = Vec::new();
+    let mut nets: Vec<urmqtt_cfg::net::Net> = Vec::new();
     for (i, s) in raw.allow_from.iter().enumerate() {
         match plain::parse_allow(s) {
             Ok(c) if nets.contains(&c) => {
@@ -1646,7 +1692,7 @@ fn validate_plaintext(
 /// its mode.
 fn validate_plaintext_enabled(
     raw: &RawPlaintext,
-    nets: &[urmqtt_cfg::net::Cidr],
+    nets: &[urmqtt_cfg::net::Net],
     network: &Network,
     acl: &Acl,
     control: &Control,
@@ -1749,7 +1795,9 @@ fn validate_plaintext_enabled(
                 if let Ok(net) = urmqtt_cfg::net::Cidr::parse(&e.from)
                     && net.prefix != 0
                     && !raw.allow_from_anywhere
-                    && !nets.iter().any(|a| a.contains_net(&net))
+                    && !nets
+                        .iter()
+                        .any(|a| a.contains_net(&urmqtt_cfg::net::Net::V4(net)))
                 {
                     errors.push(err(
                         &format!("{path}.from"),
@@ -1784,7 +1832,6 @@ fn validate_metrics(
     errors: &mut Vec<ConfigError>,
 ) -> Metrics {
     use urmqtt_cfg::fields::{MAX_METRICS_NETWORKS, MAX_METRICS_TIMEOUT_S};
-    use urmqtt_cfg::net::Cidr;
     use urmqtt_cfg::plain;
 
     if raw.port == 0 {
@@ -1815,7 +1862,7 @@ fn validate_metrics(
             format!("at most {MAX_METRICS_NETWORKS} entries"),
         ));
     }
-    let mut nets: Vec<Cidr> = Vec::new();
+    let mut nets: Vec<urmqtt_cfg::net::Net> = Vec::new();
     for (i, s) in raw.allow_from.iter().enumerate() {
         let path = format!("metrics.allow_from[{i}]");
         match plain::parse_allow(s) {
@@ -2358,6 +2405,76 @@ fn validate_network(
         mqtt_tls_port: raw.mqtt_tls_port,
         mqtt_plain_port,
         mtu,
+        ipv6: validate_ipv6(raw, errors),
+    }
+}
+
+/// `network.ipv6*` (NEXT-1, ADR-334): the same rules as the kernel's check.
+fn validate_ipv6(raw: &RawNetwork, errors: &mut Vec<ConfigError>) -> Ipv6Mode {
+    use urmqtt_cfg::net::{is_link_local6, parse_ipv6_address, parse_ipv6_gateway, same_prefix6};
+    // The field table's default is the empty string: absent.
+    let address = raw.ipv6_address.as_deref().filter(|s| !s.is_empty());
+    let gateway = raw.ipv6_gateway.as_deref().filter(|s| !s.is_empty());
+    match raw.ipv6 {
+        Ipv6Kind::Off | Ipv6Kind::Slaac => {
+            if address.is_some() || gateway.is_some() {
+                errors.push(err(
+                    "network.ipv6",
+                    "ipv6_address and ipv6_gateway are only allowed with ipv6 = \"static\"",
+                ));
+            }
+            if raw.ipv6 == Ipv6Kind::Slaac {
+                Ipv6Mode::Slaac
+            } else {
+                Ipv6Mode::Off
+            }
+        }
+        Ipv6Kind::Static => {
+            let addr = match address {
+                None => {
+                    errors.push(err(
+                        "network.ipv6_address",
+                        "required when ipv6 = \"static\"",
+                    ));
+                    None
+                }
+                Some(s) => parse_ipv6_address(s)
+                    .map_err(|m| errors.push(err("network.ipv6_address", format!("{s:?} {m}"))))
+                    .ok(),
+            };
+            let gw = match gateway {
+                None => {
+                    errors.push(err(
+                        "network.ipv6_gateway",
+                        "required when ipv6 = \"static\"",
+                    ));
+                    None
+                }
+                Some(s) => parse_ipv6_gateway(s)
+                    .map_err(|m| errors.push(err("network.ipv6_gateway", format!("{s:?} {m}"))))
+                    .ok(),
+            };
+            let (Some((address, prefix_len)), Some(gateway)) = (addr, gw) else {
+                return Ipv6Mode::Off;
+            };
+            if !is_link_local6(&gateway) && !same_prefix6(&address, &gateway, prefix_len) {
+                errors.push(err(
+                    "network.ipv6_gateway",
+                    "must be link-local (fe80::/10) or inside network.ipv6_address's prefix: the router has to be on the link",
+                ));
+            }
+            if gateway == address {
+                errors.push(err(
+                    "network.ipv6_gateway",
+                    "must not be the broker's own address",
+                ));
+            }
+            Ipv6Mode::Static {
+                address,
+                prefix_len,
+                gateway,
+            }
+        }
     }
 }
 
@@ -3059,6 +3176,8 @@ mod console_tests;
 mod devices_tests;
 #[cfg(test)]
 mod encryption_tests;
+#[cfg(test)]
+mod ipv6_tests;
 #[cfg(test)]
 mod log_tls_tests;
 #[cfg(test)]

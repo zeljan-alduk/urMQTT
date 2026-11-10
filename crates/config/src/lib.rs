@@ -101,6 +101,35 @@ pub struct Network {
     /// option 26, else 1500; a value (576..=9000) is used as it is, in every
     /// mode, and is the only source with a static address.
     pub mtu: Option<u16>,
+    /// `network.ipv6*` (NEXT-1, ADR-334).
+    pub ipv6: Ipv6,
+}
+
+/// IPv6 (`network.ipv6`, NEXT-1, ADR-334).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ipv6 {
+    /// IPv6 frames are dropped (the default, and every blob before format 23).
+    Off,
+    /// The link-local address and one global address from Router
+    /// Advertisements.
+    Slaac,
+    /// A configured address with its on-link prefix length, and the router.
+    Static {
+        address: [u8; 16],
+        prefix_len: u8,
+        gateway: [u8; 16],
+    },
+}
+
+impl Ipv6 {
+    /// The TOML word.
+    pub const fn name(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Slaac => "slaac",
+            Self::Static { .. } => "static",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -612,7 +641,7 @@ pub struct Trust {
 }
 
 /// A network, as the plaintext allow-list and `ip_identities` hold it.
-pub use urmqtt_cfg::net::Cidr;
+pub use urmqtt_cfg::net::{Cidr, Net};
 
 /// How a plaintext client proves who it is (P1, ADR-229).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -648,7 +677,8 @@ pub struct Plaintext {
     pub port: u16,
     /// Networks that may connect; empty and `allow_from_anywhere` false only
     /// while disabled (a configuration check refuses it otherwise).
-    pub allow_from: &'static [Cidr],
+    /// IPv4 and (format 23, ADR-334) IPv6 networks.
+    pub allow_from: &'static [Net],
     pub allow_from_anywhere: bool,
     pub auth: PlainAuth,
     pub anonymous_identity: &'static str,
@@ -714,7 +744,8 @@ pub struct Metrics {
     pub port: u16,
     /// Networks that may scrape; never empty while enabled (the check refuses
     /// it), and there is no "anywhere".
-    pub allow_from: &'static [Cidr],
+    /// IPv4 and (format 23, ADR-334) IPv6 networks.
+    pub allow_from: &'static [Net],
     /// Connections held at once on one data core.
     pub max_connections: u32,
     /// ... from one source address on one data core.

@@ -79,6 +79,11 @@ subscription to `$SYS/broker/#` gets the current values at once.
 | `$SYS/broker/entropy/source` | what seeded the random number generator at boot: `virtio-rng`, `rndr` (aarch64) or `rdrand` (x86_64), `virtio-rng+rndr`, or the weak path `jitter+firmware` (`jitter` when the firmware gave no value; ADR-263, docs/DEPLOY.md "Entropy"). Also `"entropy":{"source":...}` in the info reply |
 | `$SYS/broker/console/dropped` | console lines lost to a slow reader |
 | `$SYS/broker/net/mtu` | the link MTU in use, bytes: `network.mtu`, else DHCP option 26, else 1500; at most 1500 (NOW-19, ADR-264). The boot line `net: mtu N (static\|dhcp\|default)` says where it came from; a lower value than the network's is safe, a higher one loses the large packets |
+| `$SYS/broker/net/ipv6/mode` | `off`, `slaac` or `static` (`network.ipv6`, NEXT-1, ADR-334) |
+| `$SYS/broker/net/ipv6/address/link_local`, `address/global` | the IPv6 addresses in use (RFC 5952 text; empty: none yet, still in duplicate address detection, or duplicate) |
+| `$SYS/broker/net/ipv6/router`, `mtu` | the IPv6 default router (empty: none) and the IPv6 MTU (the link's, or less from a Router Advertisement) |
+| `$SYS/broker/net/ipv6/frames_in`, `dropped`, `fragments`, `ext_headers` | IPv6 frames the interfaces of all cores took, and dropped: in all, fragments (never reassembled), extension headers that may not be skipped (ADR-330) |
+| `$SYS/broker/net/ipv6/dad_duplicate`, `prefixes_ignored` | addresses another node claimed (duplicate address detection; such an address is never used), and advertised prefixes not used (one global address only, ADR-331) |
 | `$SYS/broker/net/queues` | virtio-net queue pairs in use: 1, or one per data core with a multiqueue NIC whose RSS steers flows (NEXT-6, ADR-310). The boot line `net: multiqueue: ...` or `net: one queue pair: <reason>` says why |
 | `$SYS/broker/net/queue/received/<k>`, `sent/<k>`, `forwarded/<k>`, `interrupts/<k>` | per queue pair k (pair k belongs to data core k; ADR-312): frames received and sent on it, frames core k received there for another core's flow and passed to core 0 (should stay 0 for MQTT traffic: a growing number means the device does not hash as the broker programmed it, which costs a hop per frame but loses nothing), and its receive interrupts. Metrics `urmqtt_network_queue_*{queue="k"}`; every 5 s with multiqueue the console line `net: queue pair k (core k): ...` |
 | `$SYS/broker/iommu/mode`, `state` | DMA remapping (H4b, ADR-305): `devices.iommu` (`off`, `auto`, `require`) and what it gave: `off` (not used), `none` (no IOMMU described: `auto` went on without), `failed` (described, none came up), `active`. Also `"iommu":{...}` in the info reply and a `status` line `iommu <state> (<mode>): ...` when the key is not `off` |
@@ -178,8 +183,8 @@ or NIC queue is retransmitted by TCP a second or more later).
 
 **The limit on established connections per source address (NOW-14, ADR-280).**
 `limits.max_connections_per_ip` (default 1024; 0: no limit) bounds how many TLS
-connections (the MQTT port and the WebSocket port together) one IPv4 address may
-hold at once, all cores added up: the per-address handshake limit above only
+connections (the MQTT port and the WebSocket port together) one IPv4 address, or
+one IPv6 /64 (ADR-332), may hold at once, all cores added up: the per-address handshake limit above only
 covers handshakes still in flight, so a client that finishes its handshakes could
 otherwise hold thousands of connections. An address at its limit gets no SYN-ACK
 (its TCP retries after its backoff, nothing is kept, no handshake token and no
@@ -194,6 +199,31 @@ address and one limit; a limit the site reaches shows as `per_address/refused`
 and `syn_dropped` growing while that site's devices fail to reconnect. The
 plaintext listener has its own `plaintext.max_connections_per_ip` and is not
 counted here.
+## IPv6 (NEXT-1, ADR-330 to ADR-334)
+
+**Off by default.** With `network.ipv6 = "slaac"` the broker makes its link-local address (`fe80::` and the
+EUI-64 of its MAC) and one global address from the first /64 prefix the router advertises (the same interface
+identifier, so the address is known in advance: `<prefix>:5054:ff:fe12:3456` for the MAC `52:54:00:12:34:56`);
+with `"static"` it uses `network.ipv6_address` and `network.ipv6_gateway`. Every listener that takes IPv4 clients
+(TLS, WebSocket, plaintext, metrics) then takes IPv6 ones too. The boot log says each step:
+
+```text
+net: ipv6 slaac: link-local address fe80::5054:ff:fe12:3456 (EUI-64), global address from router advertisements
+net: ipv6 link-local address fe80::5054:ff:fe12:3456 in use (duplicate address detection passed)
+net: ipv6 default router fe80::1 (lifetime 1800 s)
+net: ipv6 global address 2001:db8:1:0:5054:ff:fe12:3456 in use (duplicate address detection passed)
+```
+
+What to look for: `... is in use by another node on the link (duplicate address detection): not used` (an error:
+another machine has that address; fix the static address, or the other machine), `no router advertisement after 3
+solicitations; link-local only` (the network sends no RAs: use `"static"`), `prefix ... advertised, not used` (a
+second prefix; only the first is used), `valid lifetime over, removed` (the router stopped advertising the prefix).
+The console's `status` has three `ipv6 ...` lines; the topics above and the `urmqtt_ipv6_*` metrics count what the
+interfaces took and dropped. Per-address limits count an IPv6 /64 as one address (ADR-332): devices behind one
+/64 share them as devices behind one IPv4 NAT do. `plaintext.allow_from` and `metrics.allow_from` take IPv6
+networks (`2001:db8::/32`); `plaintext.ip_identities` does not (an IPv6 client of `auth = "ip"` is refused).
+SNTP, syslog, statsd and log shipping stay IPv4.
+
 ## Metrics for Prometheus (ADR-290 to ADR-294)
 
 The same numbers as `$SYS/broker/...`, as a Prometheus scrape target served by the kernel itself: no exporter to run.

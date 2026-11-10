@@ -320,7 +320,8 @@ impl Sys {
         self.report(broker, now_ms);
         let (mut busy, mut accepted) = ([0u8; MAX_CPUS], [0u64; MAX_CPUS]);
         let mut queues = [NetQueueSys::default(); MAX_PAIRS];
-        let info = collect(&mut busy, &mut accepted, &mut queues);
+        let v6 = crate::netproto::v6_info();
+        let info = collect(&mut busy, &mut accepted, &mut queues, &v6);
         broker.sys_publish(sys::QUERY_INFO_RESPONSE, sys::json(&info).as_bytes());
     }
 
@@ -360,7 +361,8 @@ impl Sys {
             Command::Status => {
                 let (mut busy, mut accepted) = ([0u8; MAX_CPUS], [0u64; MAX_CPUS]);
                 let mut queues = [NetQueueSys::default(); MAX_PAIRS];
-                let info = collect(&mut busy, &mut accepted, &mut queues);
+                let v6 = crate::netproto::v6_info();
+                let info = collect(&mut busy, &mut accepted, &mut queues, &v6);
                 for l in sys::status_lines(
                     &info,
                     level_name(urmqtt_log::level()),
@@ -398,7 +400,8 @@ impl Sys {
 fn refresh(broker: &mut Broker) {
     let (mut busy, mut accepted) = ([0u8; MAX_CPUS], [0u64; MAX_CPUS]);
     let mut queues = [NetQueueSys::default(); MAX_PAIRS];
-    let info = collect(&mut busy, &mut accepted, &mut queues);
+    let v6 = crate::netproto::v6_info();
+    let info = collect(&mut busy, &mut accepted, &mut queues, &v6);
     sys::topics(&info, |t, v| broker.sys_publish_retained(t, v.as_bytes()));
     if let Some(report) = crate::diag::served_report() {
         broker.sys_publish_retained("$SYS/diag/report", report.as_bytes());
@@ -412,6 +415,7 @@ pub fn collect<'a>(
     busy: &'a mut [u8; MAX_CPUS],
     accepted: &'a mut [u64; MAX_CPUS],
     queues: &'a mut [NetQueueSys; MAX_PAIRS],
+    v6: &'a crate::netproto::V6Info,
 ) -> Info<'a> {
     let cores = crate::smp::count().clamp(1, MAX_CPUS);
     // Relaxed: statistics.
@@ -498,6 +502,19 @@ pub fn collect<'a>(
         console_dropped: CONSOLE_DROPPED.load(Ordering::Relaxed),
         net_mtu: crate::netproto::mtu().0,
         net_queues: queues.get(..pairs).unwrap_or(&[]),
+        ipv6: urmqtt_broker::sys::Ipv6Sys {
+            mode: v6.mode,
+            link_local: &v6.link_local,
+            global: &v6.global,
+            router: &v6.router,
+            mtu: v6.mtu,
+            frames_in: v6.frames_in,
+            dropped: v6.dropped,
+            fragments: v6.fragments,
+            ext_headers: v6.ext_headers,
+            dad_duplicate: v6.dad_duplicate,
+            prefixes_ignored: v6.prefixes_ignored,
+        },
         drops,
         qos2,
         backpressure: bp,

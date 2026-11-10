@@ -274,7 +274,7 @@ impl Sut {
         let mut q = Vec::new();
         self.s
             .input(self.now, PEER, seg, &mut self.app, &mut |d, b| {
-                assert_eq!(d, PEER);
+                assert_eq!(d, Addr::v4(PEER));
                 q.push(b.to_vec())
             });
         self.service(q);
@@ -429,7 +429,7 @@ impl StateMachineTest for ActiveModelTest {
         match s {
             Step::Connect => {
                 let remote = Endpoint {
-                    addr: PEER,
+                    addr: Addr::v4(PEER),
                     port: SINK,
                 };
                 t.lport = t.s.ephemeral_port(remote, |p| p == 8883).unwrap();

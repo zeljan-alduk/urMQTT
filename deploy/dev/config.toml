@@ -9,6 +9,10 @@ mqtt_plain_port = 1883         # 0 = disabled; non-zero is only allowed in the d
 # mtu = 1460                  # largest IPv4 packet (576-9000); unset or 0: from DHCP option 26, else 1500.
 #                             # Set it on a smaller network that does not say so (Google Cloud's VPC: 1460,
 #                             # with mode = "static"); TCP segments follow it (MSS = mtu - 40). Format 7.
+# ipv6 = "slaac"               # "off" (default) | "slaac" | "static": IPv6 beside IPv4 on every listener (format 23).
+#                             # slaac: link-local + one global address from the router's advertisements (EUI-64);
+# ipv6_address = "2001:db8:1::10/64"   # static only: the address and its on-link prefix length
+# ipv6_gateway = "fe80::1"             # static only: the router (link-local, or inside the prefix)
 
 [tls]
 cert = "server.pem"            # files are read from deploy/<env>/

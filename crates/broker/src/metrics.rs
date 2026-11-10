@@ -544,6 +544,48 @@ pub static RULES: &[Rule] = &[
         "urmqtt_network_mtu_bytes",
         "The link MTU in use.",
     ),
+    // IPv6 (NEXT-1, ADR-331).
+    info(
+        "net/ipv6/mode",
+        "urmqtt_ipv6_mode_info",
+        "mode",
+        "network.ipv6: off, slaac or static.",
+    ),
+    g(
+        "net/ipv6/mtu",
+        "urmqtt_ipv6_mtu_bytes",
+        "The IPv6 MTU in use (the link's, or less from a Router Advertisement).",
+    ),
+    c(
+        "net/ipv6/frames_in",
+        "urmqtt_ipv6_frames_received_total",
+        "IPv6 frames the interfaces of all cores received.",
+    ),
+    c(
+        "net/ipv6/dropped",
+        "urmqtt_ipv6_frames_dropped_total",
+        "IPv6 frames dropped, for any reason (malformed, not for this host, unsupported).",
+    ),
+    c(
+        "net/ipv6/fragments",
+        "urmqtt_ipv6_fragments_dropped_total",
+        "IPv6 fragments dropped (no reassembly).",
+    ),
+    c(
+        "net/ipv6/ext_headers",
+        "urmqtt_ipv6_extension_headers_dropped_total",
+        "IPv6 packets dropped for their extension headers.",
+    ),
+    c(
+        "net/ipv6/dad_duplicate",
+        "urmqtt_ipv6_duplicate_addresses_total",
+        "Addresses another node on the link claimed (Duplicate Address Detection).",
+    ),
+    c(
+        "net/ipv6/prefixes_ignored",
+        "urmqtt_ipv6_prefixes_ignored_total",
+        "Advertised prefixes not used (one global address only).",
+    ),
     g(
         "net/queues",
         "urmqtt_network_queue_pairs",
@@ -760,6 +802,18 @@ pub static RULES: &[Rule] = &[
 pub const NOT_EXPOSED: &[(&str, &str)] = &[
     ("plaintext/allow_from", "the operator's network plan, text"),
     ("websocket/path", "configuration text without a number"),
+    (
+        "net/ipv6/address/link_local",
+        "an address, text; the mode and counters are exposed",
+    ),
+    (
+        "net/ipv6/address/global",
+        "an address, text; the mode and counters are exposed",
+    ),
+    (
+        "net/ipv6/router",
+        "an address, text; the mode and counters are exposed",
+    ),
 ];
 
 /// The metrics listener's own numbers (not part of `$SYS`).

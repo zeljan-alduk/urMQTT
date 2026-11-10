@@ -307,7 +307,70 @@ fn is_default(f: &fields::Field, v: &[u8]) -> bool {
     }
 }
 
+/// An allow-list: well-formed entries, none twice; an IPv6 network only in
+/// format 23 or later (ADR-334).
+fn allow_list(b: &Blob<'_>, t: u16, key: &'static str) -> Result<(), CfgError> {
+    use crate::plain;
+    for (n, s) in b.strs(t).enumerate() {
+        let net = plain::parse_allow(s).map_err(|m| err(key, m))?;
+        if net.is_v6() && b.version() < 23 {
+            return Err(err(key, "an IPv6 network needs configuration format 23"));
+        }
+        if b.strs(t)
+            .take(n)
+            .any(|o| plain::parse_allow(o).ok() == Some(net))
+        {
+            return Err(err(key, "a network is listed twice"));
+        }
+    }
+    Ok(())
+}
+
+/// `network.ipv6*` (NEXT-1, ADR-334).
+fn ipv6(b: &Blob<'_>) -> Result<(), CfgError> {
+    use crate::net::{is_link_local6, parse_ipv6_address, parse_ipv6_gateway, same_prefix6};
+    let mode = b.variant(tag::NET_IPV6); // 0 off, 1 slaac, 2 static
+    let (addr, gw) = (b.str(tag::NET_IPV6_ADDRESS), b.str(tag::NET_IPV6_GATEWAY));
+    if mode != 2 {
+        if !addr.is_empty() || !gw.is_empty() {
+            return Err(err(
+                "network.ipv6",
+                "ipv6_address and ipv6_gateway are only allowed with ipv6 = \"static\"",
+            ));
+        }
+        return Ok(());
+    }
+    if addr.is_empty() {
+        return Err(err(
+            "network.ipv6_address",
+            "required when ipv6 = \"static\"",
+        ));
+    }
+    if gw.is_empty() {
+        return Err(err(
+            "network.ipv6_gateway",
+            "required when ipv6 = \"static\"",
+        ));
+    }
+    let (a, len) = parse_ipv6_address(addr).map_err(|m| err("network.ipv6_address", m))?;
+    let g = parse_ipv6_gateway(gw).map_err(|m| err("network.ipv6_gateway", m))?;
+    if !is_link_local6(&g) && !same_prefix6(&a, &g, len) {
+        return Err(err(
+            "network.ipv6_gateway",
+            "must be link-local (fe80::/10) or inside network.ipv6_address's prefix: the router has to be on the link",
+        ));
+    }
+    if g == a {
+        return Err(err(
+            "network.ipv6_gateway",
+            "must not be the broker's own address",
+        ));
+    }
+    Ok(())
+}
+
 fn network(b: &Blob<'_>, dev: bool) -> Result<(), CfgError> {
+    ipv6(b)?;
     let mode = b.variant(tag::NET_MODE); // 0 dhcp, 1 static, 2 auto
     let has_addr = b.cidr(tag::NET_ADDRESS).is_some();
     let has_gw = b.ipv4(tag::NET_GATEWAY).is_some();
@@ -404,12 +467,7 @@ fn plaintext(b: &Blob<'_>, max_len: u64, max_levels: u64) -> Result<(), CfgError
     let (password, anonymous, by_ip) = (auth == 0, auth == 1, auth == 2);
 
     // Well-formed entries, enabled or not.
-    for (n, s) in b.strs(tag::PL_ALLOW_FROM).enumerate() {
-        plain::parse_allow(s).map_err(|m| err("plaintext.allow_from", m))?;
-        if b.strs(tag::PL_ALLOW_FROM).take(n).any(|o| o == s) {
-            return Err(err("plaintext.allow_from", "a network is listed twice"));
-        }
-    }
+    allow_list(b, tag::PL_ALLOW_FROM, "plaintext.allow_from")?;
     for (n, s) in b.strs(tag::PL_USERS).enumerate() {
         let (id, _) = plain::parse_user(s).map_err(|m| err("plaintext.users", m))?;
         let earlier = b.strs(tag::PL_USERS).take(n);
@@ -740,14 +798,7 @@ pub const SESSION_EXPIRY_MSG: &str =
 /// when it is on. There is no "anywhere": a metrics endpoint without an
 /// allow-list is not a configuration.
 fn metrics(b: &Blob<'_>) -> Result<(), CfgError> {
-    use crate::plain;
-
-    for (n, s) in b.strs(tag::METRICS_ALLOW_FROM).enumerate() {
-        plain::parse_allow(s).map_err(|m| err("metrics.allow_from", m))?;
-        if b.strs(tag::METRICS_ALLOW_FROM).take(n).any(|o| o == s) {
-            return Err(err("metrics.allow_from", "a network is listed twice"));
-        }
-    }
+    allow_list(b, tag::METRICS_ALLOW_FROM, "metrics.allow_from")?;
     if !b.bool(tag::METRICS_ENABLED) {
         return Ok(());
     }

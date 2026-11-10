@@ -23,3 +23,6 @@ tha = "tha"
 CNA = "CNA"
 # OpenSSL's -passin option (scripts/pki.sh)
 passin = "passin"
+# IPv6 Neighbour Discovery (RFC 4861; the `nd` module of urmqtt-net, the ipv6_nd fuzz target)
+ND = "ND"
+nd = "nd"

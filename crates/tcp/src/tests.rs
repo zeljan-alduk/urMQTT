@@ -40,7 +40,7 @@ struct Echo {
 }
 
 impl App for Echo {
-    fn syn_ok(&mut self, _port: u16, _r: [u8; 4]) -> bool {
+    fn syn_ok(&mut self, _port: u16, _r: Addr) -> bool {
         !self.shed_syns
     }
     fn accept(&mut self, c: ConnId, port: u16, _r: Endpoint) -> bool {
@@ -744,8 +744,10 @@ fn survives_heavy_loss() {
 #[test]
 fn connection_state_stays_small() {
     assert!(
-        // 96 before the out-of-order list, window scale and timestamps (ADR-222).
-        core::mem::size_of::<Conn>() <= 112,
+        // 96 before the out-of-order list, window scale and timestamps (ADR-222);
+        // 112 before the key held 128-bit addresses (NEXT-1, ADR-330: +12 bytes
+        // of address, rounded up to the struct's alignment).
+        core::mem::size_of::<Conn>() <= 128,
         "{}",
         core::mem::size_of::<Conn>()
     );

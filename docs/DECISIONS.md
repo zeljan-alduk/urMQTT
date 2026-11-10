@@ -5214,3 +5214,174 @@ device the kernel does not drive is unaffected; one for a driven device would be
    - The VNC keyboard path (PS/2 scancodes, virtio-input) was not exercised with a passphrase in QEMU; the
      smoke types on the serial port. Those readers are the Diagnostic entry's, tested there (ADR-258).
    - The memory of the running VM, and a hypervisor that logs keystrokes, are out of reach as before.
+
+## ADR-330 — IPv6 in the own stack: one address type, a strict header, no fragments (NEXT-1)
+
+- **Status:** Accepted. Implements the stack half of ROADMAP NEXT-1. Configuration format 23 (ADR-334); no store
+  schema change. ADR-330 to ADR-334 belong to this item.
+- **Context.** `crates/net` classified IPv6 as "everything else" and the TCP stack's addresses were `[u8; 4]`
+  throughout; the README promised "IPv6 + SLAAC later", and VPS providers (netcup) hand out a /64.
+
+### What was built
+
+1. **One address type** (`urmqtt_net::addr::Addr`, 16 bytes): an IPv4 address is stored IPv4-mapped
+   (`::ffff:a.b.c.d`), an IPv6 one as itself. *Decided* over an enum or a second TCP stack per family: one table,
+   one connection id space, one `App` interface; every limit, allow-list and log takes the same type. The two
+   families never collide because the IPv6 parser drops every packet whose source or destination is IPv4-mapped
+   (an IPv6 peer cannot pose as an IPv4 address in an allow-list), and every source whose first 64 bits are zero
+   (so an IPv6 /64 key is never 0, ADR-332). `Display` writes RFC 5952 text; IPv4 stays dotted.
+2. **The header** (`net/src/ipv6.rs`, own, `no_std`, no `unsafe`, no allocation on receive): version 6, the
+   payload length within the frame (Ethernet padding cut), no multicast or loopback source, no loopback or `::`
+   destination; TCP from `::` refused. **Extension headers** are walked with hard bounds: at most 4 headers and 256
+   bytes; Hop-by-Hop first only; Hop-by-Hop and Destination Options skipped when every option in them may be
+   (Pad1, PadN, Router Alert, or unknown with action bits 00), at most 32 options; a Routing header only with
+   Segments Left 0 (this host is no router). **Fragments are dropped and counted**, not reassembled: *decided*
+   because a TCP peer follows our MSS, the ICMPv6 this host takes is small, and reassembly is memory an attacker
+   chooses; ESP, AH, No Next Header and unknown upper layers are dropped too. Nothing sends an ICMPv6 error
+   (Parameter Problem, Packet Too Big): *decided* to keep the host silent towards malformed input; the cost is
+   that a peer learns nothing (it retries or times out).
+3. **ICMPv6** (`ipv6::parse_icmp6`): the checksum over the pseudo-header always; echo; Neighbour Discovery per RFC
+   4861 §6.1/§7.1 (hop limit 255, code 0, no extension header, minimum length, every option non-zero and within
+   the message, an RA only from a link-local source, an NS from `::` only to a solicited-node group and without
+   a link-layer option, no multicast target, a solicited NA never to a group). Router Advertisements keep at most
+   8 Prefix Information options (the rest counted); RDNSS is counted and ignored (the broker resolves no names);
+   Redirects are valid and ignored; MLD queries are answered (ADR-331).
+4. **TCP over IPv6** (`crates/tcp`): the pseudo-header by family in one function (`wire::checksum`: IPv4's when
+   both addresses are IPv4, else IPv6's with the 32-bit length); the MSS per family (`mss6_for_mtu`: MTU - 60, at
+   most 1440 under the 1500-byte frames, `TcpStack::set_mss6`); SYN cookies, timestamps, SACK, window scaling,
+   RFC 5961 and the active open unchanged. **No checksum offload** is negotiated with virtio-net, so software
+   computes both families on receive and transmit and there are no offload fields to fill (recorded because the
+   item asked for them). **Per-connection memory** grows from 112 to 128 bytes (the 4-tuple key holds 16-byte
+   addresses; M15 budget, `connection_state_stays_small` raised with the reason).
+5. **Off by default** (`network.ipv6 = "off"`, ADR-334): IPv6 frames are then dropped and counted as before the
+   item, and nothing about IPv4 changes but the address type.
+
+## ADR-331 — IPv6 addresses: link-local and one global one, DAD, SLAAC or static, the source rule (NEXT-1)
+
+- **Status:** Accepted (NEXT-1).
+- **Decision.**
+  1. **Addresses** (`net/src/nd.rs`, `Host6`): the link-local `fe80::` + the modified EUI-64 of the MAC, and **at
+     most one global address**: with SLAAC the first autonomous /64 prefix of the Router Advertisements + the same
+     EUI-64, or the configured static one. Further prefixes, prefixes other than /64, link-local, multicast and
+     all-zero prefixes make no address (the last two found by the `ipv6_nd` fuzzer); they are counted
+     (`net/ipv6/prefixes_ignored`, every advertisement) and logged once per prefix (the last 8 remembered; found in
+     review: a link with a second prefix wrote a log line with every Router Advertisement). *Decided:* EUI-64, neither RFC 8981 temporary addresses (a server's address
+     goes into DNS and firewalls; temporary addresses are for clients' privacy) nor RFC 7217 stable-opaque ones
+     (they need a secret that survives reboots, which the kernel would have to keep before the store opens, and
+     the operator could no longer predict the address from the MAC). The MAC is visible on the link anyway.
+  2. **DAD** (RFC 4862 §5.4): one solicitation from `::` per new address, then 1 s; an NA for it or a DAD probe of
+     another node in that second marks it duplicate, never used, logged as an error and counted. A tentative
+     address takes no traffic. Our preferred addresses are defended (an NS from `::` for one gets an NA to all
+     nodes); an NA from another node for one of them is counted, the address kept. An MLDv2 report joins the
+     solicited-node groups (from `::` while the link-local address is tentative, RFC 3590, else from it) so that
+     switches that snoop MLD deliver Neighbour Solicitations, and **every Multicast Listener Query** for all groups
+     or one of ours (link-local source, hop limit 1) is answered with a report, MLDv1 to an MLDv1 querier, at most
+     once a second (found in review: a Linux bridge with a querier otherwise stops delivering the groups after its
+     listener interval, about 260 s, and the router then cannot resolve a static address whose interface
+     identifier differs from the link-local one's).
+     No random delay before the first probe (one host per link segment of a VM).
+  3. **SLAAC** (RFC 4862 §5.5): three Router Solicitations 4 s apart once the link-local address is usable, then a
+     warning if no RA came; the default router and its lifetime, its link-layer address, the MTU (1280 to the
+     link's, ignored outside) and the prefixes from each RA, the two-hour rule of §5.5.3 (e); the address goes when
+     its valid lifetime ends. A deprecated address (preferred lifetime over) keeps serving: inbound connections
+     choose it, not this host. **Static** (`ipv6 = "static"`): the configured address with its on-link prefix and
+     the gateway (link-local, what VPS providers give, or inside the prefix), DAD on both addresses, Router
+     Advertisements ignored and counted.
+  4. **The source rule** (`addr::V6Locals::for_peer`): a link-local peer is answered from the link-local address,
+     every other one from the global address. The interface (which writes the IPv6 header) and the TCP stack
+     (which sums the pseudo-header) use the same function; a segment to the other address of ours is dropped and
+     counted (`wrong_local`), and a peer with no fitting address of ours gets nothing (`no_local`).
+  5. **Neighbours**: learned from every frame for us (a frame from off the link teaches the router's MAC, as for
+     IPv4), from NS options, NAs and the RA's source link-layer option; 32 entries per core, least recently seen
+     replaced. The owner solicits an unknown next hop (one NS per address per second, 4 addresses remembered) and
+     drops the segment that needed it (TCP retransmits). No NUD probing of stale entries: a peer that moved is
+     relearned from its next frame. Neighbour Discovery answers are limited to 100/s, echo replies share the IPv4
+     ICMP budget (100/s); no echo to a group.
+  6. **Cores**: core 0 owns the NIC and runs Neighbour Discovery; it publishes the addresses, router, on-link
+     prefix and MTU to the other cores (`CoreMsg::Ip6Config`), which take their steered TCP flows only. Events of
+     one RA beyond the first are queued (at most 32) and handed out by the next poll.
+  7. **Visible**: log lines for every address, router, MTU and DAD result; `$SYS/broker/net/ipv6/{mode,
+     address/link_local, address/global, router, mtu, frames_in, dropped, fragments, ext_headers, dad_duplicate,
+     prefixes_ignored}` (the counters summed over the cores' interfaces), the same in the JSON info reply under
+     `net.ipv6`, three `ipv6 ...` lines in the console's `status`, and the metrics `urmqtt_ipv6_*` (the addresses
+     are text and not exported as metrics).
+
+## ADR-332 — Every listener takes both families; an IPv6 /64 is one source for every per-address limit (NEXT-1)
+
+- **Status:** Accepted (NEXT-1).
+- **Decision.**
+  1. **Dual-stack listeners**: the TLS port, the WebSocket port, the plaintext port and the Prometheus endpoint
+     take IPv6 clients with no setting of their own; `network.ipv6` decides for all (a listener is an open port,
+     the address family is the network's question).
+  2. **The unit of an abusive source is the /64** of an IPv6 address (`SourceKey::of`, settled by NOW-14 and used
+     now): one subscriber holds a whole /64, so counting /128s would let one host take a limit 2^64 times. It is
+     the key of `limits.max_connections_per_ip` (ADR-280), of `limits.max_handshakes_in_flight_per_ip` (the
+     admission's address list, `Admission`), and of the plaintext and WebSocket address tables (connections per
+     address, failed logins and lock-outs: `plain::Src`, IPv4 address or /64, 128 bits per slot). *Accepted cost:*
+     devices behind one IPv6 /64 share the limits as devices behind one IPv4 NAT do (SECURITY.md).
+  3. **Allow-lists** (`plaintext.allow_from`, `metrics.allow_from`) take IPv6 networks beside IPv4 ones
+     (`cfg::net::Net`, strict parser: no zone, no embedded IPv4, no host bits; `::/0` refused like `0.0.0.0/0`, the
+     `*_anywhere` keys say "everything"). An IPv6 client never matches an IPv4 network and the other way round.
+     **Not done:** `plaintext.ip_identities` stays IPv4 (`auth = "ip"`): an IPv6 client of such a listener matches
+     no network and is refused with the "no network" reason.
+  4. Log lines name a client's address in its own text form (a lock-out, a refused login).
+
+## ADR-333 — Steering IPv6 flows, how NEXT-1 was verified, what it does not do (NEXT-1)
+
+- **Status:** Accepted (NEXT-1).
+1. **Steering.** The Toeplitz hash over the IPv6 4-tuple (source and destination of the IPv6 header, then the
+   ports, 36 bytes under the 40-byte Microsoft key; the specification's IPv6 vectors are a test) picks the core of
+   an IPv6 flow through the same table as IPv4 (ADR-311). The classifier uses the interface's own parser, so a
+   frame is steered by its TCP 4-tuple exactly when the core's interface would take it as TCP, and everything else
+   (ICMPv6, a fragment, malformed) goes to core 0 to be answered or dropped and counted. With multiqueue, the
+   driver asks the device for TCP/IPv6 hashing beside TCP/IPv4 where the device offers it (`HASH_TCPV6`, never a
+   type it does not offer; never the `_EX` types); otherwise IPv6 flows arrive on pair 0 and core 0 steers them.
+2. **Verification.** Host tests: `net` (the header and extension-header bounds, ND validation, RA parsing, DAD,
+   SLAAC, the two-hour rule, static mode, the source rule, rate limits, the interface's TCP in and out, the
+   classifier), `tcp` (the scripted RFC 9293/5961 cases rerun over IPv6, the MSS per family, both families in one
+   table, the local address per peer, the checksum against the IP layer's own), `cfg`/`config-schema`/`config`/
+   `plain`/`tools/config`/the builder page (format 23, the IPv6 text and networks, the /64 key), `virtio` (the RSS
+   hash types), `broker` (`$SYS`, JSON, console, metrics rules). Fuzz: `ipv6_nd` (new: the header, ICMPv6 and ND,
+   SLAAC and DAD driven by frames and time, the classifier against the parser, the configuration's IPv6 text;
+   two minutes, 3.35 million runs after the fix of the multicast-prefix finding), `net_frame` (now with SLAAC
+   started), `tcp_segment` (every input over both families). QEMU (`SMOKE_ONLY=ipv6`, aarch64 under HVF and TCG,
+   x86_64 under TCG): SLAAC against QEMU's own router beside DHCP (the addresses read from `$SYS` over IPv4);
+   IPv6 only through `scripts/ipv6-relay.py` (QEMU forwards host ports over IPv4 only, so the relay is the
+   guest's whole link on a dgram netdev and carries host sockets into the guest over IPv6): an mTLS publish and
+   subscribe over IPv6 with mosquitto, an echo answered, a fragment and a must-not-skip option dropped and counted,
+   the RA's MTU 1480 giving an MSS of 1420; dual stack with both addresses static: a message published over IPv4
+   delivered to a subscriber over IPv6, the metrics endpoint answering an IPv6 scrape from the IPv6 network in its
+   allow-list and nothing over IPv4. IPv4 unchanged: the existing `metrics`, `plaintext`, `storm`, attack,
+   `net_mtu` and `conn-limit` scenarios pass; the throughput rig (`scripts/bench.sh --relaxed`, HVF, three runs
+   each against `release-v0.6.0`) shows the in-guest handshake rate unchanged and the QEMU user-network rate
+   within its run-to-run spread (see the NEXT-1 notes for the numbers).
+3. **Not done (listed, not hidden).** Fragment reassembly; ICMPv6 errors (Packet Too Big, Parameter Problem,
+   Destination Unreachable) sent or acted on (no path MTU discovery beyond the RA's MTU); more than one global
+   address or prefix; temporary or stable-opaque addresses; DHCPv6 (an RA's M and O flags are ignored);
+   NUD probing; Secure Neighbour Discovery or RA guard (ND is unauthenticated, as ARP is); UDP over IPv6, so
+   SNTP, syslog, statsd and log shipping over TLS stay IPv4; the outbound TCP client over IPv6 (the stack can, the
+   configuration's collector is IPv4); `plaintext.ip_identities` with IPv6 networks; IPv6 in the dev-only command-line
+   words (an SNTP server for tests). The plaintext port's boot warning judges the global IPv6 address as it does
+   the IPv4 one (added in review: a VPS's IPv6 address is public even where its IPv4 one is not). A jumbogram is a
+   malformed packet.
+
+## ADR-334 — `network.ipv6`, `network.ipv6_address`, `network.ipv6_gateway` and IPv6 allow-list entries, configuration format 23 (NEXT-1)
+
+- **Status:** Accepted (NEXT-1). Tags 410 to 412 (apart from the other v0.6.0 items' tags); format 23 (reserved
+  for this item; 21 stays unused, ADR-320).
+- **Decision.** `network.ipv6 = "off" | "slaac" | "static"` (an enum, default `"off"`), `network.ipv6_address`
+  (`2001:db8:1::10/64`: a global unicast address with its on-link prefix length 1 to 128, host bits allowed) and
+  `network.ipv6_gateway` (`fe80::1` or an address inside that prefix, not the address itself), both required with
+  `static` and refused otherwise. *Off by default* because IPv6 opens the listeners to a second network surface;
+  `"off"` writes no record, so every existing configuration keeps its format and boots on older kernels.
+  `slaac` or `static` needs **format 23**; so does an IPv6 network in `plaintext.allow_from` or
+  `metrics.allow_from` (the key is older, the value is not: the packer lifts the format by the value, and the
+  kernel's check refuses an IPv6 entry in a blob of an older format). An older kernel refuses a format 23 image by
+  its version instead of booting IPv4-only, or refusing an allow-list it cannot read, without saying why. The TOML
+  path and the kernel's blob check give the same refusals (tested in both directions). The builder page shows the
+  three keys in `[network]` with the three choices in all 15 languages; a v0.5.0 or format-22 template refuses
+  them with the reason.
+- **Upgrade and downgrade.** Nothing changes for an image that does not set the keys: IPv6 frames are dropped as
+  before. Turning IPv6 on adds the listeners' IPv6 surface (every port that listens on IPv4 also listens on IPv6);
+  `metrics.allow_from` and `plaintext.allow_from` without IPv6 networks keep refusing every IPv6 client. Back to
+  v0.5.x or a format-22 kernel: remove the keys and the IPv6 allow-list entries.

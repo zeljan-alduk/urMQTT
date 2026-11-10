@@ -22,7 +22,7 @@ use urmqtt_mqtt::{Limits, QoS};
 use urmqtt_net::admission::{Admission, Outcome, REASONS, Reason};
 use urmqtt_sync::spsc::{Consumer, Producer};
 use urmqtt_sync::sync::OnceCell;
-use urmqtt_tcp::{Endpoint, TcpStack};
+use urmqtt_tcp::{Addr, Endpoint, TcpStack};
 use urmqtt_tls::{CertRole, Event, IdentityField, ServerSetup, TicketKeys, TlsServer, TlsSession};
 
 use crate::conn_limit;
@@ -141,7 +141,7 @@ struct Conn {
 /// has a byte budget (ADR-034).
 struct Flight {
     /// The peer's address, for the per-address limit.
-    ip: [u8; 4],
+    ip: Addr,
     /// When the connection was accepted (ms, wrapping), for the latency.
     t0_ms: u32,
 }
@@ -213,7 +213,7 @@ pub struct MqttService {
     /// Established TLS connections of this core that the per-address table
     /// counts (NOW-14, ADR-280): connection id to its source address. Given
     /// back in `drop_conn`, the one place every close path ends in.
-    sources: Slab<[u8; 4]>,
+    sources: Slab<Addr>,
     /// `sources`' length (how many this core holds), for the report.
     sources_held: u32,
     /// Refusals and dropped SYNs already logged, by [`Reason`]: the log
@@ -779,7 +779,7 @@ impl MqttService {
     /// A SYN: answer it only if a connection from `ip` would be admitted
     /// now (PERF, ADR-080). A refusal here costs no state and no packet,
     /// and the client's TCP retries after its backoff instead of at once.
-    pub fn syn_ok(&mut self, port: u16, ip: [u8; 4], now_ms: u64) -> bool {
+    pub fn syn_ok(&mut self, port: u16, ip: Addr, now_ms: u64) -> bool {
         // The plaintext port: its allow-list, lock-out and limits (P1).
         if self.is_plain_policy_port(port) {
             let (heap_ok, behind) = (self.heap_ok(now_ms), self.db_behind());
@@ -854,7 +854,7 @@ impl MqttService {
     /// a refusal for it burns no handshake token; if admission then refuses,
     /// the place is given back. On success the connection `c` is remembered in
     /// `sources` when the table counted it.
-    fn admit(&mut self, c: u32, tls: bool, ip: [u8; 4], now_ms: u64) -> bool {
+    fn admit(&mut self, c: u32, tls: bool, ip: Addr, now_ms: u64) -> bool {
         use conn_limit::Counted;
         let placed = if tls {
             conn_limit::open(ip)
@@ -1021,7 +1021,7 @@ impl MqttService {
 
     // ---- TCP events (called from the stack, see `TcpEvents`) -------------
 
-    fn on_accept(&mut self, c: u32, port: u16, ip: [u8; 4], now_ms: u64) -> bool {
+    fn on_accept(&mut self, c: u32, port: u16, ip: Addr, now_ms: u64) -> bool {
         // The plaintext port has an admission of its own (P1, ADR-230).
         let policy = self.is_plain_policy_port(port);
         // The Prometheus endpoint: plain HTTP with an admission of its own
@@ -1699,7 +1699,7 @@ impl MqttService {
                     self.flow.window(c, tconn, closed);
                 }
             }
-            CoreMsg::IpConfig { .. } => {}
+            CoreMsg::IpConfig { .. } | CoreMsg::Ip6Config(_) => {}
         }
     }
 
@@ -1784,10 +1784,9 @@ impl MqttService {
             if let Some(p) = self.plain.as_mut() {
                 // The plaintext listener judges its exposure from the address
                 // the interface has now (one core says it).
-                p.tick(
-                    tcp.local_addr(),
-                    self.me == dataplane::workers(self.n).start,
-                );
+                let first = self.me == dataplane::workers(self.n).start;
+                p.tick(tcp.local_addr(), first);
+                p.tick6(tcp.local6().global, first);
             }
         }
         watchdog::step(watchdog::Step::Shrink);
@@ -2304,7 +2303,7 @@ pub struct TcpEvents<'a> {
 }
 
 impl urmqtt_tcp::App for TcpEvents<'_> {
-    fn syn_ok(&mut self, port: u16, remote: [u8; 4]) -> bool {
+    fn syn_ok(&mut self, port: u16, remote: Addr) -> bool {
         self.mqtt.syn_ok(port, remote, self.now_ms)
     }
 

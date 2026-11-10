@@ -5,11 +5,19 @@
 //!
 //! Replies never need ARP: the cache learns the sender's MAC from every
 //! IPv4 frame received, and a server only answers peers that reached it.
+//!
+//! IPv6 (NEXT-1, ADR-330, ADR-331) sits beside IPv4 in [`Host6`]: frames
+//! of type 0x86DD go through [`ipv6::parse_ipv6`]; TCP to the address this
+//! host answers that peer from is handed out like IPv4's, ICMPv6 goes to
+//! Neighbour Discovery on the owner, and the rest is dropped and counted.
 
 use alloc::vec::Vec;
 
+use crate::addr::Addr;
 use crate::dhcp;
 use crate::ipv4::{self, Arp, Echo, Ip, Mac, PROTO_ICMP, PROTO_TCP, PROTO_UDP};
+use crate::ipv6::{self, V6Error};
+use crate::nd::{Event6, Host6};
 
 const NEIGHBOURS: usize = 32;
 /// ICMP echo replies per second.
@@ -23,14 +31,21 @@ pub const MAX_SEND_MTU: u16 = 1500;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Event {
     Dhcp(dhcp::Event),
-    PingReply { from: Ip, rtt_ms: u64 },
+    PingReply {
+        from: Ip,
+        rtt_ms: u64,
+    },
+    /// IPv6 addresses, router or MTU changed (owner only).
+    V6(Event6),
 }
 
 /// What a received frame turned out to be.
 pub enum Rx<'a> {
-    /// A TCP segment for us: give it to the TCP stack.
+    /// A TCP segment for us: give it to the TCP stack. `src` is IPv4 or
+    /// IPv6; for IPv6 the destination was the address
+    /// [`crate::addr::V6Locals::for_peer`] picks for `src`.
     Tcp {
-        src: Ip,
+        src: Addr,
         seg: &'a [u8],
     },
     /// A UDP datagram for us that is not DHCP (SNTP answers, T1). Only the
@@ -81,6 +96,10 @@ pub struct Iface {
     /// Largest IPv4 packet sent (NOW-19).
     mtu: u16,
     buf: Vec<u8>,
+    /// The IPv6 side (off until started or configured).
+    pub v6: Host6,
+    /// The time of the last `receive` or `poll` (for IPv6 solicitations).
+    now_ms: u64,
     pub stats: Stats,
 }
 
@@ -105,8 +124,14 @@ impl Iface {
             ping: None,
             mtu: DEFAULT_MTU,
             buf: Vec::with_capacity(1600),
+            v6: Host6::new(mac, owner),
+            now_ms,
             stats: Stats::default(),
         }
+    }
+
+    pub fn mac(&self) -> Mac {
+        self.mac
     }
 
     pub fn addr(&self) -> Option<Ip> {
@@ -126,6 +151,7 @@ impl Iface {
     /// [`MAX_SEND_MTU`] and at least 576. Returns the value in use.
     pub fn set_mtu(&mut self, mtu: u16) -> u16 {
         self.mtu = mtu.clamp(dhcp::MTU_MIN, MAX_SEND_MTU);
+        self.v6.set_link_mtu(self.mtu);
         self.mtu
     }
 
@@ -219,13 +245,123 @@ impl Iface {
         self.buf = buf;
     }
 
-    /// Wraps a TCP segment from the stack into a frame for `dst`.
-    pub fn send_tcp(&mut self, dst: Ip, seg: &[u8], out: &mut impl FnMut(&[u8])) {
+    /// Wraps a TCP segment from the stack into a frame for `dst` (either
+    /// family).
+    pub fn send_tcp(&mut self, dst: Addr, seg: &[u8], out: &mut impl FnMut(&[u8])) {
+        let dst = match dst.as_v4() {
+            Some(d) => d,
+            None => return self.send_tcp6(dst.octets(), seg, out),
+        };
         let Some(mac) = self.neighbour(dst) else {
             self.stats.no_neighbour += 1;
             return;
         };
         self.send_ip(dst, mac, PROTO_TCP, |b, _| b.extend_from_slice(seg), out);
+    }
+
+    /// An IPv6 TCP segment: from the address [`crate::addr::V6Locals::for_peer`]
+    /// picks (the one the TCP stack summed), to the next hop's MAC.
+    fn send_tcp6(&mut self, dst: ipv6::Ip6, seg: &[u8], out: &mut impl FnMut(&[u8])) {
+        let Some(src) = self.v6.locals().for_peer(&dst) else {
+            self.v6.stats.no_neighbour += 1;
+            return;
+        };
+        let Some(mac) = self.v6.neighbour(&dst) else {
+            self.v6.stats.no_neighbour += 1;
+            let now = self.now_ms;
+            self.v6.solicit(now, &dst, out);
+            return;
+        };
+        if ipv6::IPV6_HDR + seg.len() > usize::from(self.v6.mtu()) {
+            self.v6.stats.too_big += 1;
+            return;
+        }
+        let mut buf = core::mem::take(&mut self.buf);
+        buf.clear();
+        ipv4::push_eth(&mut buf, mac, self.mac, ipv6::ETHERTYPE_IPV6);
+        ipv6::push_ipv6(&mut buf, &src, &dst, ipv6::NH_TCP, 64, seg.len());
+        buf.extend_from_slice(seg);
+        out(&buf);
+        self.buf = buf;
+        self.v6.stats.frames_out += 1;
+    }
+
+    /// An IPv6 packet (NEXT-1).
+    fn receive6<'a>(
+        &mut self,
+        now_ms: u64,
+        eth: &ipv4::EthFrame<'a>,
+        out: &mut impl FnMut(&[u8]),
+    ) -> Rx<'a> {
+        self.v6.stats.frames_in += 1;
+        if !self.v6.enabled() {
+            self.v6.stats.dropped += 1;
+            return Rx::None;
+        }
+        let ip = match ipv6::parse_ipv6(eth.payload) {
+            Ok(ip) => ip,
+            Err(e) => {
+                let s = &mut self.v6.stats;
+                s.dropped += 1;
+                match e {
+                    V6Error::Fragment => s.fragments += 1,
+                    V6Error::ExtHeader => s.ext_headers += 1,
+                    V6Error::Mapped | V6Error::BadAddress => s.bad_address += 1,
+                    V6Error::Truncated | V6Error::NotV6 | V6Error::BadLength => {}
+                }
+                return Rx::None;
+            }
+        };
+        match ip.next {
+            ipv6::NH_TCP => {
+                let locals = self.v6.locals();
+                let s = &mut self.v6.stats;
+                if !locals.holds(&ip.dst) {
+                    s.not_for_us += 1;
+                    s.dropped += 1;
+                    return Rx::None;
+                }
+                if locals.for_peer(&ip.src) != Some(ip.dst) {
+                    s.wrong_local += 1;
+                    s.dropped += 1;
+                    return Rx::None;
+                }
+                self.v6.learn_from_frame(&ip.src, eth.src, now_ms);
+                Rx::Tcp {
+                    src: Addr::v6(ip.src),
+                    seg: ip.payload,
+                }
+            }
+            ipv6::NH_ICMPV6 => {
+                let (tokens, since, limited) = (
+                    &mut self.icmp_tokens,
+                    &mut self.icmp_since,
+                    &mut self.stats.icmp_limited,
+                );
+                let mut echo_ok = || {
+                    if now_ms.saturating_sub(*since) >= 1000 {
+                        *tokens = ICMP_PER_SEC;
+                        *since = now_ms;
+                    }
+                    if *tokens == 0 {
+                        *limited += 1;
+                        return false;
+                    }
+                    *tokens -= 1;
+                    true
+                };
+                match self.v6.icmp(now_ms, eth.src, &ip, &mut echo_ok, out) {
+                    Some(e) => Rx::Event(Event::V6(e)),
+                    None => Rx::None,
+                }
+            }
+            _ => {
+                // UDP over IPv6: no service of this host listens on it yet.
+                self.v6.stats.udp += 1;
+                self.v6.stats.dropped += 1;
+                Rx::None
+            }
+        }
     }
 
     /// Handles one received frame.
@@ -236,15 +372,17 @@ impl Iface {
         out: &mut impl FnMut(&[u8]),
     ) -> Rx<'a> {
         self.stats.frames_in += 1;
+        self.now_ms = now_ms;
         let Some(eth) = ipv4::parse_eth(frame) else {
             self.stats.dropped += 1;
             return Rx::None;
         };
-        if eth.dst != self.mac && eth.dst != ipv4::BROADCAST_MAC {
+        if eth.dst != self.mac && eth.dst != ipv4::BROADCAST_MAC && !self.v6.accepts_mac(&eth.dst) {
             self.stats.dropped += 1;
             return Rx::None;
         }
         match eth.ethertype {
+            ipv6::ETHERTYPE_IPV6 => self.receive6(now_ms, &eth, out),
             ipv4::ETHERTYPE_ARP => {
                 if let Some(a) = ipv4::parse_arp(eth.payload) {
                     self.learn(a.spa, a.sha, now_ms);
@@ -280,7 +418,7 @@ impl Iface {
                 }
                 match ip.proto {
                     PROTO_TCP if for_us => Rx::Tcp {
-                        src: ip.src,
+                        src: Addr::v4(ip.src),
                         seg: ip.payload,
                     },
                     PROTO_ICMP if for_us && self.owner => {
@@ -387,6 +525,10 @@ impl Iface {
 
     /// Timers: DHCP retransmissions, renewals and expiry.
     pub fn poll(&mut self, now_ms: u64, out: &mut impl FnMut(&[u8])) -> Option<Event> {
+        self.now_ms = now_ms;
+        if let Some(e) = self.v6.poll(now_ms, out) {
+            return Some(Event::V6(e));
+        }
         let (send, ev) = self.dhcp.as_mut().map_or((None, None), |d| d.poll(now_ms));
         if let Some(s) = send {
             self.send_ip(
@@ -564,13 +706,12 @@ mod tests {
         let f = frame([1, 2, 3, 4], [10, 0, 2, 15], PROTO_TCP, &[0; 20]);
         assert!(matches!(
             i.receive(2, &f, &mut |_| {}),
-            Rx::Tcp {
-                src: [1, 2, 3, 4],
-                ..
-            }
+            Rx::Tcp { src, .. } if src == Addr::v4([1, 2, 3, 4])
         ));
         out.clear();
-        i.send_tcp([1, 2, 3, 4], &[0; 20], &mut |f| out.push(f.to_vec()));
+        i.send_tcp(Addr::v4([1, 2, 3, 4]), &[0; 20], &mut |f| {
+            out.push(f.to_vec())
+        });
         assert_eq!(ipv4::parse_eth(&out[0]).unwrap().dst, GW);
         // Not for us: dropped.
         let other = frame([10, 0, 2, 2], [10, 0, 2, 99], PROTO_TCP, &[0; 20]);
@@ -608,13 +749,13 @@ mod tests {
         i.set_addr(Some(([10, 0, 2, 15], 24)), Some([10, 0, 2, 2]));
         let mut out: Vec<Vec<u8>> = Vec::new();
         let client = [203, 0, 113, 9];
-        i.send_tcp(client, &[0; 20], &mut |f| out.push(f.to_vec()));
+        i.send_tcp(Addr::v4(client), &[0; 20], &mut |f| out.push(f.to_vec()));
         assert!(out.is_empty());
         assert_eq!(i.stats.no_neighbour, 1);
         // The client's SYN arrives from the router's MAC.
         let f = frame(client, [10, 0, 2, 15], PROTO_TCP, &[0; 20]);
         i.receive(1, &f, &mut |_| {});
-        i.send_tcp(client, &[0; 20], &mut |f| out.push(f.to_vec()));
+        i.send_tcp(Addr::v4(client), &[0; 20], &mut |f| out.push(f.to_vec()));
         assert_eq!(ipv4::parse_eth(&out[0]).unwrap().dst, GW);
         // An on-link neighbour must not be taken for the router.
         let mut j = Iface::new(MAC, true, None, 0);
@@ -622,11 +763,11 @@ mod tests {
         let f = frame([10, 0, 2, 77], [10, 0, 2, 15], PROTO_TCP, &[0; 20]);
         j.receive(1, &f, &mut |_| {});
         out.clear();
-        j.send_tcp(client, &[0; 20], &mut |f| out.push(f.to_vec()));
+        j.send_tcp(Addr::v4(client), &[0; 20], &mut |f| out.push(f.to_vec()));
         assert!(out.is_empty());
         // A new gateway forgets the old MAC.
         i.set_addr(Some(([10, 0, 2, 15], 24)), Some([10, 0, 2, 3]));
-        i.send_tcp(client, &[0; 20], &mut |f| out.push(f.to_vec()));
+        i.send_tcp(Addr::v4(client), &[0; 20], &mut |f| out.push(f.to_vec()));
         assert!(out.is_empty());
     }
 
@@ -710,10 +851,14 @@ mod tests {
         i.receive(0, &f, &mut |_| {});
         let mut out: Vec<Vec<u8>> = Vec::new();
         // TCP: 1440 bytes of segment make a 1460-byte packet; one more does not fit.
-        i.send_tcp([10, 0, 2, 2], &[0; 1440], &mut |f| out.push(f.to_vec()));
+        i.send_tcp(Addr::v4([10, 0, 2, 2]), &[0; 1440], &mut |f| {
+            out.push(f.to_vec())
+        });
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].len(), 14 + 1460);
-        i.send_tcp([10, 0, 2, 2], &[0; 1441], &mut |f| out.push(f.to_vec()));
+        i.send_tcp(Addr::v4([10, 0, 2, 2]), &[0; 1441], &mut |f| {
+            out.push(f.to_vec())
+        });
         assert_eq!((out.len(), i.stats.too_big), (1, 1));
         // UDP: 1432 bytes of payload is the largest datagram.
         assert!(i.send_udp([10, 0, 2, 2], 1, 2, &[0; 1432], &mut |f| {
@@ -741,5 +886,102 @@ mod tests {
         i.set_mtu(1500);
         i.receive(2, &f, &mut |f| out.push(f.to_vec()));
         assert_eq!(out.len(), 3);
+    }
+
+    /// NEXT-1: TCP over IPv6 in and out once the static address passed DAD;
+    /// a segment to the address the host would not answer that peer from,
+    /// fragments and UDP are dropped and counted; nothing is taken while
+    /// IPv6 is off.
+    #[test]
+    fn ipv6_tcp_in_and_out() {
+        use crate::ipv6::{ETHERTYPE_IPV6, NH_TCP, link_local_of, push_ipv6};
+        use crate::nd::Mode6;
+        let me: ipv6::Ip6 = [0x20, 1, 0xd, 0xb8, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10];
+        let gw: ipv6::Ip6 = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let peer: ipv6::Ip6 = [0x20, 1, 0xd, 0xb8, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7];
+        let f6 = |src: &ipv6::Ip6, dst: &ipv6::Ip6, next: u8| {
+            let mut b = Vec::new();
+            ipv4::push_eth(&mut b, MAC, GW, ETHERTYPE_IPV6);
+            push_ipv6(&mut b, src, dst, next, 64, 20);
+            b.extend_from_slice(&[0; 20]);
+            b
+        };
+        let mut i = Iface::new(MAC, true, None, 0);
+        assert!(matches!(
+            i.receive(0, &f6(&peer, &me, NH_TCP), &mut |_| {}),
+            Rx::None
+        ));
+        assert_eq!(i.v6.stats.dropped, 1, "off: dropped");
+        i.v6.start(
+            0,
+            Mode6::Static {
+                addr: me,
+                prefix_len: 64,
+                gateway: gw,
+            },
+        );
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        while i.poll(0, &mut |f| out.push(f.to_vec())).is_some() {}
+        // Tentative: not taken.
+        assert!(matches!(
+            i.receive(10, &f6(&peer, &me, NH_TCP), &mut |_| {}),
+            Rx::None
+        ));
+        let mut ev = Vec::new();
+        while let Some(e) = i.poll(1000, &mut |f| out.push(f.to_vec())) {
+            ev.push(e);
+        }
+        assert_eq!(ev.len(), 2);
+        match i.receive(1001, &f6(&peer, &me, NH_TCP), &mut |_| {}) {
+            Rx::Tcp { src, seg } => assert_eq!((src, seg.len()), (Addr::v6(peer), 20)),
+            _ => panic!("not handed out"),
+        }
+        // The reply goes to the router's MAC (learned from the frame) from `me`.
+        out.clear();
+        i.send_tcp(Addr::v6(peer), &[0; 20], &mut |f| out.push(f.to_vec()));
+        let eth = ipv4::parse_eth(&out[0]).unwrap();
+        assert_eq!((eth.dst, eth.ethertype), (GW, ETHERTYPE_IPV6));
+        let ip = ipv6::parse_ipv6(eth.payload).unwrap();
+        assert_eq!(
+            (ip.src, ip.dst, ip.next, ip.payload.len()),
+            (me, peer, NH_TCP, 20)
+        );
+        // A global peer to our link-local address: the wrong local address.
+        let ll = link_local_of(MAC);
+        assert!(matches!(
+            i.receive(1002, &f6(&peer, &ll, NH_TCP), &mut |_| {}),
+            Rx::None
+        ));
+        assert_eq!(i.v6.stats.wrong_local, 1);
+        // UDP, a fragment.
+        i.receive(1003, &f6(&peer, &me, 17), &mut |_| {});
+        i.receive(1003, &f6(&peer, &me, 44), &mut |_| {});
+        assert_eq!((i.v6.stats.udp, i.v6.stats.fragments), (1, 1));
+        // Larger than the IPv6 MTU: not sent.
+        i.set_mtu(1280);
+        out.clear();
+        i.send_tcp(Addr::v6(peer), &[0; 1241], &mut |f| out.push(f.to_vec()));
+        assert!(out.is_empty());
+        assert_eq!(i.v6.stats.too_big, 1);
+        i.send_tcp(Addr::v6(peer), &[0; 1240], &mut |f| out.push(f.to_vec()));
+        assert_eq!(out.len(), 1);
+        // An unknown next hop: a solicitation instead, then nothing more.
+        let mut j = Iface::new(MAC, true, None, 0);
+        j.v6.start(
+            0,
+            Mode6::Static {
+                addr: me,
+                prefix_len: 64,
+                gateway: gw,
+            },
+        );
+        while j.poll(0, &mut |_| {}).is_some() {}
+        while j.poll(1000, &mut |_| {}).is_some() {}
+        out.clear();
+        j.send_tcp(Addr::v6(peer), &[0; 20], &mut |f| out.push(f.to_vec()));
+        assert_eq!(out.len(), 1);
+        let ip = ipv6::parse_ipv6(ipv4::parse_eth(&out[0]).unwrap().payload).unwrap();
+        assert_eq!(ip.next, ipv6::NH_ICMPV6);
+        assert_eq!(j.v6.stats.no_neighbour, 1);
     }
 }

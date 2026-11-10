@@ -4,8 +4,8 @@
 
 use super::*;
 use crate::sys::{
-    self, Backpressure, Drops, Handshakes, Info, IommuSys, Mqtt5Info, NetQueueSys, PerAddress,
-    PlainInfo, Qos2, WsInfo, topic_names,
+    self, Backpressure, Drops, Handshakes, Info, IommuSys, Ipv6Sys, Mqtt5Info, NetQueueSys,
+    PerAddress, PlainInfo, Qos2, WsInfo, topic_names,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -46,6 +46,19 @@ fn full<'a>(busy: &'a [u8], accepted: &'a [u64]) -> Info<'a> {
                 interrupts: 4,
             },
         ],
+        ipv6: Ipv6Sys {
+            mode: "static",
+            link_local: "fe80::1",
+            global: "2001:db8::10",
+            router: "fe80::2",
+            mtu: 1480,
+            frames_in: 9,
+            dropped: 2,
+            fragments: 1,
+            ext_headers: 0,
+            dad_duplicate: 0,
+            prefixes_ignored: 0,
+        },
         drops: Drops {
             slow_subscriber: 1,
             offline: 2,

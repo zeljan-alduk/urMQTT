@@ -221,13 +221,18 @@ impl<'a> Authenticator<'a> {
     /// Decides a CONNECT from `src` with the credentials it carried.
     pub fn authenticate(
         &self,
-        src: [u8; 4],
+        src: impl Into<Option<[u8; 4]>>,
         username: Option<&str>,
         password: Option<&[u8]>,
     ) -> Verdict<'_> {
         match self.mode {
             PlainAuth::Anonymous => Verdict::Accept(self.anonymous),
             PlainAuth::Ip => {
+                // An IPv6 client (`None`): `ip_identities` holds IPv4
+                // networks only (ADR-334), so none is its network.
+                let Some(src) = src.into() else {
+                    return Verdict::Reject(Rejection::NoNetwork);
+                };
                 let ip = u32::from_be_bytes(src);
                 self.networks
                     .iter()

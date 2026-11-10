@@ -211,6 +211,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "ipv6_nd"
+path = "fuzz_targets/ipv6_nd.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "tls_record"
 path = "fuzz_targets/tls_record.rs"
 test = false

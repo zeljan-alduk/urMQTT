@@ -31,4 +31,4 @@ pub mod sources;
 
 pub use allow::{AllowList, Exposure};
 pub use auth::{Account, Accounts, Authenticator, Rejection, Verdict};
-pub use sources::{Limits, Open, Sources, Syn};
+pub use sources::{Limits, Open, Sources, Src, Syn};
