@@ -2291,5 +2291,88 @@ fn a_connection_without_connect_is_closed_after_the_connect_timeout() {
     assert_eq!(b.close_requested(late.c), Some(CloseReason::KeepAliveTimeout));
 }
 
+/// Security review v0.6.0, AUTHZ-4 (ADR-364): the Will was checked at
+/// CONNECT only, and a close for a revocation (CloseReason::Disallowed)
+/// published it, or armed it with its delay: a revoked device's delayed Will
+/// went out 30 s after the revocation. It is dropped now.
+#[test]
+fn a_revoked_devices_delayed_will_is_dropped() {
+    let mut b = Broker::new(cfg());
+    let mut s = watcher(&mut b, 0);
+    let (d, _) = C5::connect(
+        &mut b,
+        "d1",
+        true,
+        &[Prop::SessionExpiryInterval(60)],
+        Some(will(30)),
+        0,
+    );
+    b.disconnect_conn(d.c, CloseReason::Disallowed);
+    b.closed(d.c, 100);
+    assert_eq!(b.stats().wills_pending, 0, "not armed");
+    b.tick(30_100);
+    b.tick(60_100);
+    assert!(s.recv(&mut b).is_empty());
+    assert_eq!(b.stats().wills_published, 0);
+    // Any other close still publishes (or arms) the Will.
+    let (d, _) = C5::connect(
+        &mut b,
+        "d1",
+        true,
+        &[Prop::SessionExpiryInterval(60)],
+        Some(will(0)),
+        61_000,
+    );
+    b.closed(d.c, 61_100);
+    assert_eq!(s.recv(&mut b).len(), 1);
+}
+
+/// AUTHZ-4 (ADR-364): a run-time account narrowed to read-only ("no
+/// publish, no Will") has its live login closed (Disallowed); that close
+/// published the Will it armed while it was `full`.
+#[test]
+fn a_narrowed_accounts_will_is_dropped_with_its_login() {
+    let mut b = Broker::new(Config {
+        plain: Some(plain()),
+        ..cfg()
+    });
+    let mut a = C5::open(&mut b, 0);
+    assert!(b.set_plain_identity(a.c, "alice"));
+    a.send(&mut b, &connect5("a", 0), 0);
+    a.recv(&mut b);
+    a.subscribe(&mut b, &[("lan/#", q(QoS::AtMostOnce))], 0);
+    let mut p = C5::open(&mut b, 0);
+    assert!(b.set_plain_identity(p.c, "bob"));
+    p.send(
+        &mut b,
+        &P5::Connect(Connect5 {
+            clean_start: true,
+            keep_alive: 0,
+            properties: Props::EMPTY,
+            client_id: "x",
+            will: Some(Will5 {
+                properties: Props::EMPTY,
+                topic: "lan/bob/status",
+                payload: b"gone",
+                qos: QoS::AtMostOnce,
+                retain: false,
+            }),
+            username: None,
+            password: None,
+        }),
+        0,
+    );
+    assert_eq!(p.recv(&mut b)[0].code(), 0);
+    b.set_login_class(|id| if id == "bob" { CLASS_READ_ONLY } else { CLASS_FULL });
+    let closed = b.disconnect_unless(|id, _| id != "bob", CloseReason::Disallowed);
+    assert_eq!(closed, 1);
+    b.closed(p.c, 10);
+    let got = a.recv(&mut b);
+    assert!(
+        !got.iter().any(|g| matches!(g, G::Publish { topic, .. } if topic == "lan/bob/status")),
+        "{got:?}"
+    );
+}
+
 #[path = "shared_tests.rs"]
 mod shared_tests;

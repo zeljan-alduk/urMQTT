@@ -2200,7 +2200,17 @@ impl Broker {
         let expiry = attached
             .and_then(|sid| self.sessions.get(sid))
             .map_or(0, |s| s.expiry_s);
-        if let Some(w) = conn.extra.and_then(|e| e.will).filter(|_| !self.stopping) {
+        // A connection closed because its identity lost the right to be
+        // here (revoked, disallowed, its account removed or changed:
+        // CloseReason::Disallowed) has its Will dropped (ADR-364): the Will
+        // was authorised at CONNECT, for rights the identity no longer has,
+        // and a delayed one would go out after the revocation.
+        let withdrawn = conn.close == Some(CloseReason::Disallowed);
+        if let Some(w) = conn
+            .extra
+            .and_then(|e| e.will)
+            .filter(|_| !self.stopping && !withdrawn)
+        {
             match attached {
                 Some(sid) if expiry > 0 && w.delay_s > 0 => {
                     let delay = w.delay_s.min(expiry);
