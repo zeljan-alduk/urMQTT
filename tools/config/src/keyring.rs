@@ -16,10 +16,7 @@
 //!    the Release workflow) must name `tag`: the tag a mirror or a file name
 //!    claims is not trusted, so the signed `SHA256SUMS` of an older release
 //!    cannot be passed off as a newer one (security review of v0.6.0,
-//!    SUPPLY-2, ADR-381).
-
-//!    the release workflow since v0.1.0) must name `tag`: an older release,
-//!    genuinely signed, is not accepted under a newer tag (ADR-365).
+//!    SUPPLY-2, ADR-381; ADR-365 in the boot lens).
 //!
 //! `urmqtt-config check-release --pubkey` and `urmqtt-disk slots stage
 //! --pubkey` have no tag; [`check_builtin`] applies these rules there, with the
@@ -323,13 +320,8 @@ pub fn verify(keys: &[RingKey], tag: &str, sums: &[u8], sig: &str) -> Result<Rin
     let comment = &signed.signature.trusted_comment;
     if comment_tag(comment) != Some(tag) {
         return Err(format!(
-            "the signature is for {}, not {tag} (trusted comment {comment:?}): a signed release under another tag",
+            "the signature is for {}, not {tag} (trusted comment {comment:?}): a signed file of one release is never accepted as another (ADR-365)",
             comment_tag(comment).unwrap_or("no release tag")
-
-    let comment = &signed.signature.trusted_comment;
-    if !same_tag(comment_tag(comment), tag) {
-        return Err(format!(
-            "SHA256SUMS signed with {what} is the release \"{comment}\", not {tag}: a signed file of one release is never accepted as another (ADR-365)"
         ));
     }
     Ok(RingVerified {
@@ -337,19 +329,6 @@ pub fn verify(keys: &[RingKey], tag: &str, sums: &[u8], sig: &str) -> Result<Rin
         key: key.clone(),
         pinned,
     })
-}
-
-/// The tag a trusted comment names (`urMQTT v0.6.0 release <commit>`), or "".
-pub fn comment_tag(comment: &str) -> &str {
-    comment
-        .strip_prefix("urMQTT ")
-        .and_then(|r| r.split(' ').next())
-        .unwrap_or("")
-}
-
-/// `v0.6.0` and `0.6.0` are the same tag; anything else must be equal.
-fn same_tag(a: &str, b: &str) -> bool {
-    !a.is_empty() && a.strip_prefix('v').unwrap_or(a) == b.strip_prefix('v').unwrap_or(b)
 }
 
 /// The key ring of the repository, built into the tool (with the key files it
@@ -378,7 +357,9 @@ pub fn check_untagged(ring: &[RingKey], sums: &[u8], sig: &str) -> Result<(), St
         return Ok(());
     };
     let signed = release::verify_sums(&key.text, sums, sig)?;
-    let tag = comment_tag(&signed.signature.trusted_comment).to_owned();
+    let tag = comment_tag(&signed.signature.trusted_comment)
+        .unwrap_or("")
+        .to_owned();
     verify(ring, &tag, sums, sig).map(|_| ())
 }
 

@@ -70,17 +70,10 @@ function verifyWithKeys(builder, tag, sums, sig) {
   // comment, `urMQTT <tag> release <commit>`), or the signed SHA256SUMS of an older release could be
   // offered as a newer one (security review of v0.6.0, SUPPLY-2, ADR-381).
   if (tag && signedTag !== tag) {
-    throw new Error(`the signature is for ${signedTag || 'no release tag'}, not ${tag} (trusted comment "${v.trusted_comment}"): the mirror offers another release under this tag`);
+    throw new Error(`the signature is for ${signedTag || 'no release tag'}, not ${tag} (SHA256SUMS is signed as "${v.trusted_comment}", not as ${tag}): a signed file of one release is never accepted as another, the mirror offers another release under this tag (ADR-365)`);
   }
-
   const forTag = tag || signedTag;
   const who = `key ${id}${key.formerTest ? ", the project's former test key," : ''}`;
-  // The signed trusted comment names the release (`urMQTT v0.6.0 release <commit>`): a genuinely signed
-  // older release listed by the mirror under a newer tag is refused (ADR-365).
-  const bare = t => String(t || '').replace(/^v/, '');
-  if (tag && (!signedTag || bare(signedTag) !== bare(tag))) {
-    throw new Error(`SHA256SUMS is signed as "${v.trusted_comment}", not as ${tag}: a signed file of one release is never accepted as another`);
-  }
   if (!keyCovers(key, forTag)) {
     const range = key.validTo ? `${key.validFrom || 'the first release'} to ${key.validTo}` : `${key.validFrom} and later`;
     throw new Error(`${who} is trusted for ${range} only, not for ${forTag || 'a release without a version'}`);

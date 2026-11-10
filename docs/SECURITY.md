@@ -859,8 +859,6 @@ Every resource is bounded. What happens at the limit is part of the design:
 | Password checks (CPU) | their own admission rate, sized from a boot-time measurement | SYN dropped before any hashing; TLS admission untouched |
 | Time to finish a handshake (and, on the dev and plaintext ports, CONNECT) | 10 s (3 s while three quarters of the in-flight limit are taken) | connection aborted |
 | Time from the end of the handshake (WebSocket: the upgrade) to CONNECT | 60 s, not extended by partial input (ADR-362; before v0.6.1 there was none) | connection closed |
-
-| Time to finish a handshake and CONNECT | 10 s (3 s while three quarters of the in-flight limit are taken) | connection aborted |
 | Time to finish a close the broker started (refused handshake, CONNECT or upgrade, metrics answer, keepalive or protocol close), ADR-355 | 5 s (fixed); in TCP, a closed connection whose peer keeps its window shut is given up after the retransmission bound (8 probes, about 4 minutes) | connection reset (RST), counted in the log (`tcp: N close(s) not finished within 5000 ms reset`); smoke `attack-zero-window-close` |
 | Free heap | `memory.min_free_mb` | new connections refused (smoke: `storm`) |
 | DB core backlog | 16 384 requests | new connections refused; registry updates skipped beyond 4 096 |
@@ -873,8 +871,6 @@ Every resource is bounded. What happens at the limit is part of the design:
 | QoS 2 ids awaiting PUBREL | `max(limits.max_inflight_qos1, 64)` per session (ADR-271) | one more closes the connection, counted (`messages/qos2/inbound_full`) |
 | Publish rate per device | `limits.publish_rate_per_device` | dropped and counted |
 | Output buffered per connection | 32 KiB for deliveries; the broker's own answers (CONNACK, PINGRESP, acknowledgements, SUBACK) up to 32 KiB + `limits.max_packet_size` + 4 KiB (ADR-375) | QoS 0 dropped, QoS 1 queued; a client that sends without reading its answers has its input held and its TCP window closed until it reads; one that ignores the closed window is disconnected once 2 MiB are held (DISCONNECT 0x97) |
-
-| Output buffered per connection | 32 KiB | QoS 0 dropped, QoS 1 queued |
 | TLS KeyUpdate answers | one per period in which the broker sends nothing else (RFC 8446 §4.6.3; ADR-350) | further `update_requested` records are applied but not answered until the broker sends again |
 | Receive window | broker backpressure | TCP window closes |
 | Cross-core fan-out | 16 384 messages per core pair | QoS 0 dropped, QoS 1 kept |
