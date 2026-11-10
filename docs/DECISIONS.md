@@ -244,7 +244,7 @@ verified in the named milestone before it becomes Accepted).
 - **Handshake:** `rustls` 0.23 (`no_std`, no default features) through `UnbufferedServerConnection`. TLS 1.3 only, with suites TLS13_CHACHA20_POLY1305_SHA256 and TLS13_AES_128_GCM_SHA256, groups X25519 then secp256r1, and server and client signatures ECDSA P-256/SHA-256 (the dev and recommended production profile; other key types fail at build-time validation).
 - **Own crypto provider** (`crates/tls/src/provider`), built on RustCrypto: `aes-gcm`, `chacha20poly1305`, `p256` 0.14, `x25519-dalek`, `sha2`, `hmac`, `hkdf`. Randomness comes only from the kernel CSPRNG (ADR-025). Without it `start()` fails with `FailedToGetRandomBytes` and never falls back. ECDSA signing uses deterministic RFC 6979 nonces, so a signature does not depend on the RNG at signing time. P-256 ephemeral keys are rejection-sampled from CSPRNG bytes.
 - **Dependency hygiene:** `p256` 0.13 pulled `crypto-bigint` 0.5.5, which is affected by RUSTSEC-2026-0387 (secret-dependent branches in constant-time arithmetic). We moved to the `p256` 0.14 / `sha2` 0.11 / `hmac` 0.13 / `hkdf` 0.13 / `x509-cert` 0.3 / `der` 0.8 generation instead of ignoring the advisory, which also removed most duplicate crates. The remaining duplicates are `rand_core` 0.6 (needed by `x25519-dalek` 2 and `rand_chacha` 0.3) and `crypto-common`/`cpufeatures` (needed by `aes-gcm`/`chacha20poly1305` 0.10).
-- **Secret extraction:** rustls exposes the traffic secrets for kTLS-style offload only through `dangerous_into_kernel_connection()`, which hands over the *current* keys but no way to rekey from our side. We therefore capture the client and server application traffic secrets through a `KeyLog` keyed by the ClientHello random. After the handshake we convert to the kernel connection (to drain any post-handshake records rustls still owns, e.g. NewSessionTicket) and drop it at once.
+- **Secret extraction:** rustls exposes the traffic secrets for kTLS-style offload only through `dangerous_into_kernel_connection()`, which hands over the *current* keys but no way to rekey from our side. We therefore capture the client and server application traffic secrets through a `KeyLog` keyed by the ClientHello random. *(Superseded by ADR-340: one capture per session, no table keyed by the random.)* After the handshake we convert to the kernel connection (to drain any post-handshake records rustls still owns, e.g. NewSessionTicket) and drop it at once.
 - **Own record layer** (`record.rs`): TLS 1.3 records (RFC 8446 §5) with per-direction key, IV and 64-bit sequence numbers. It handles `KeyUpdate` in both directions (`update_requested` is answered), `close_notify`, inner content-type padding removal, the 2^14+256 ciphertext limit and the AES-GCM record limit (2^24 per key, then KeyUpdate). It is verified against RFC 8448 vectors and against a real rustls client (application data, KeyUpdate both ways).
 - **Client authentication:** a `WebPkiClientVerifier` rooted at the embedded CA, wrapped by a revocation check. `tls.revocation_list` names a file in `deploy/<env>/` with one hex serial per line; serials are normalised by stripping leading zeros so `00ab` matches `ab`. This build-time list is a bridge until the SQLite revocation table (M11). Expiry is checked against a wall clock: the firmware date at boot (Limine) plus uptime. Without a date at boot every handshake is refused (ADR-009).
 - **Identity:** the device id comes from the configured field. With `cn` it is the subject CN. With `san_uri` it is the rest of a `urn:urmqtt:device:` or `urn:urmqtt:service:` URI. The broker refuses a CONNECT whose client id differs from it (CONNACK 0x02, ADR-028), so the TLS layer authenticates and the broker authorises.
@@ -5622,3 +5622,50 @@ device the kernel does not drive is unaffected; one for a driven device would be
   for that release's tag, and `attestations` only when it is `https://github.com/<owner>/<repo>/attestations`, of the
   list's `source` repository when it names one; anything else becomes `''` and is not shown as a link (as `source`
   already was). Test: `release-binding.test.mjs`.
+
+## ADR-340 — One traffic-secret capture per TLS session, not a global table (v0.6.0 security review, R060-C1, R060-C2)
+
+- **Status:** Accepted (v0.6.1). No configuration format number and no store schema change.
+- **Context.** ADR-029 captures the two application traffic secrets (our record layer needs them for KeyUpdate)
+  through rustls's `KeyLog`, which is a field of the shared `ServerConfig` and is called with the ClientHello
+  random. The capture was a global table keyed by that random, bounded at 4096 slots, filled when the server sends
+  its flight (before any client certificate) and emptied only by a completed handshake or a rustls error. The
+  internal security review of v0.6.0 found two defects in it:
+  1. **R060-C1 (high).** A session dropped during the handshake (the kernel's `drop_conn` on a TCP close, reset or
+     handshake timeout) and the `NoIdentity` and resumed-but-revoked exits of `finish_handshake` freed nothing.
+     4096 ClientHellos from a peer without a certificate, each dropped after the server flight, left every slot
+     live; from then on every new handshake was put in slot 0, and any handshake that logged while another was
+     between its server flight and its client Finished evicted it ("traffic secrets not captured"). Broker-wide,
+     until reboot: in effect one handshake at a time. The secrets of abandoned handshakes also stayed in memory
+     unwiped. It failed closed (the captured secrets are compared with rustls's own keys), so no key confusion.
+  2. **R060-C2 (low).** The random was read from bytes 11..43 of the raw first record. RFC 8446 §5.1 lets a client
+     fragment the ClientHello; with fewer than 38 body bytes in the first record the bytes read were not the random,
+     the lookup missed and the handshake failed at its very end, after the client had authenticated.
+- **Decision.** Each session gets its own capture. `TlsServer::accept` makes a copy of the shared `ServerConfig`
+  (`ServerConfig::clone`: reference counts and empty vectors; 232 bytes on a 64-bit host) whose `key_log` is a new
+  `Arc<SecretCapture>` (76 bytes), and keeps a second reference in the handshake state. `finish_handshake` takes
+  the secrets from it (wiping it); a rustls error wipes it; and `Captured` wipes itself on drop, so every other
+  exit, including a session the kernel drops in the middle of a handshake, leaves nothing behind. There is no
+  table, no bound to evict from and no lookup by an attacker-chosen value. The ClientHello random is no longer
+  read at all: the first 6 bytes (a handshake record of version 3.x whose body starts with a ClientHello) decide
+  `NotTls`, which is earlier than the 43 bytes before; rustls reassembles a fragmented ClientHello.
+- **Alternatives.** (a) Keep the table and free the slot in a `Drop` of the handshake state and on every exit of
+  `finish_handshake`: closes the leak, but keeps a shared table that 4096 handshakes held open at once (within the
+  admission limits of a large deployment) still evict from, a lookup by a value the peer chooses (two sessions
+  with the same random share a slot), and R060-C2. (b) Keep rustls's `KernelConnection` and let it rekey: its
+  state is far larger than the 104-byte inline session of ADR-034. (c) A per-session `ServerConfig` built from
+  scratch: parses the key and certificates per connection. The copy costs nothing measurable:
+  `server_side_handshake_cost` (`ROUNDS=300`, release, Apple M4 Pro) gave a median of 235 and 236 µs with the
+  change and 237 and 239 µs without it. The heap of a handshake in flight grows by two small blocks (256 and 128
+  bytes in the buddy heap), freed when the handshake ends; an established session is unchanged
+  (`established_state_stays_small`).
+- **Not changed.** The role table (`ROLES`, ADR-049) is still global and bounded (`MAX_ROLES`, 4096): an entry is
+  written only after a chain verifies, so filling it needs a valid certificate, and an evicted or missing role is
+  not trusted (the chain is verified again at the end of the handshake), so it fails safe.
+- **Verified.** `crates/tls/tests/secret_capture.rs`: `abandoned_handshakes_do_not_break_later_overlapping_ones`
+  (4097 handshakes without a certificate dropped after the server flight, then three rounds of overlapping device
+  handshakes and a stranger's ClientHello inside a device's window: all established), `a_fragmented_client_hello_completes`
+  (splits at 1, 6, 20, 37, 38 and 100 body bytes), `not_a_client_hello_is_refused_after_six_bytes`. All three fail
+  on v0.6.0 and pass now. Unit tests `capture_tests` (taken once, wiped after a take or with one secret only,
+  different sessions with the same random keep their own secrets) replace the two tests of the removed table;
+  `the_bound_evicts_the_oldest_and_wipes_it` went with the bound it tested.
