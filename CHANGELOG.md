@@ -6,6 +6,222 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-09
+
+The **production-readiness release**: everything since v0.5.0 (signed with the release key `721316B961DCB94B`, as
+v0.4.2 and v0.5.0 were). Headline features: **IPv6** with SLAAC or static addresses beside IPv4, on every listener
+(ADR-330 to ADR-334); **Prometheus metrics** served by the kernel (ADR-290 to ADR-294); **A/B updates with
+automatic rollback**, a second boot slot on new installs (ADR-295 to ADR-299); **password accounts added and removed
+at run time** over the signed control channel (ADR-285 to ADR-289); **a limit on established TLS connections per
+source address** (ADR-280); **virtio-net multiqueue with RSS** (ADR-310 to ADR-314); and the first **outbound TCP
+connection** the broker makes, with TLS 1.3 log shipping as its user (ADR-315 to ADR-319). The security work of the
+release: **DMA remapping through the IOMMU** (VT-d, AMD-Vi, SMMUv3; ADR-305 to ADR-307), **Secure Boot completed
+for installed disks** with sealed images, `sign-iso` and revocation through `dbx` (ADR-320 to ADR-324), and **a disk
+key that is not in the image**, a passphrase typed on the console (ADR-325 to ADR-329). Also: encrypted project
+files on the builder page (ADR-300) and **the kernel as a library**, so another repository can build its own image
+from these crates (ADR-335 to ADR-339). Nothing of this release ran on a VPS or on physical hardware (see the limits
+below); nothing in it is on by default except the per-address connection limit, the new storage schema, the
+multiqueue negotiation and the two-slot layout of new installs.
+
+### Upgrading from v0.5.0
+
+- **The database migrates from schema 5 to schema 6 on the first boot, one way** (ADR-286: the `accounts` table,
+  created whether or not run-time accounts are used; one transaction, a power cut leaves schema 5 or schema 6 whole).
+  **A v0.5.x kernel refuses the migrated database** (`schema version 6 is newer than this build`) **and every backup
+  snapshot the new kernel takes**. If you may want to go back, take a backup before the update, with the VM stopped: a
+  copy of the whole data disk, or v0.5.0's `urmqtt-disk backup DISK --write` followed by `urmqtt-disk backup-extract
+  DISK OUT`; a v0.6.0 `urmqtt-disk` that writes to the disk migrates the database first. The reserved schema 7 is not
+  used: nothing else in the database changes (LATER-7 adds no schema). The data-disk layout (v2.1) is unchanged; a
+  disk that is encrypted with a console passphrase gets a superblock flag and 256 bytes of key slots (DISK-FORMAT
+  14.2) only when you choose that mode.
+- **Configuration formats go up to 23** (the kernel reads 1 to 9, 11 to 20, 22 and 23; 10 and 21 were never used and
+  are refused). A configuration is written with the format of its newest key that is not at its default, so one that
+  sets none of the new keys keeps format 13 or lower, packs into the v0.5.0 template as before and boots either
+  kernel. A new key needs: `limits.max_connections_per_ip` set to anything but 1024 **14** (ADR-280),
+  `limits.max_runtime_accounts` above 0 **15** (ADR-285), `[metrics]` **16** (ADR-290), an `[update]` key at a
+  non-default value **17** (ADR-297), `devices.iommu` other than `"off"` **18** (ADR-305),
+  `devices.virtio_net_queues = "single"` **19** (ADR-313), `observability.log_tls*` **20** (ADR-318),
+  `storage.disk_key_source = "console"` **22** (ADR-328), `network.ipv6`, `network.ipv6_address`,
+  `network.ipv6_gateway` or an IPv6 network in `plaintext.allow_from` / `metrics.allow_from` **23** (ADR-334).
+  One that sets a new key is refused when packed into an older template ("needs configuration format N, which this
+  template's kernel does not read (it reads up to 13): use a newer release"), so no older kernel boots with a key it
+  would ignore. The v0.6.0 template declares format 23. The builder page (rebuilt for format 23) picks the newest
+  release that reads what the form asks for and greys out a release whose template it cannot read.
+- **Behaviour changes with an unchanged configuration:**
+  - **A source address holds at most 1024 established TLS connections** (the MQTT and WebSocket ports together):
+    over the limit its SYN gets no answer. Devices behind one NAT share an address: a site with more than 1024
+    devices behind one address must set `limits.max_connections_per_ip` higher (or 0, off; format 14) before the
+    update. (The dev word `limits=bench` and `deploy/bench/config.toml` turn it off.)
+  - **A new install has two boot slots**: the first boot of a disk with a v0.6.0 kernel reserves a second region the
+    size of the ESP (10 MiB with the aarch64 image, about 20 MiB with the universal one) before the data partition
+    (`gpt: standby boot slot reserved ...`). **Existing installed disks stay single-slot** (a v0.6.0 kernel does not
+    move data to make room; the boot log says `boot: one boot slot (a disk prepared before v0.6.0)`) and keep
+    updating with `urmqtt-disk update-boot` as before; A/B needs a disk installed, or re-installed with
+    `export-db` / `import-devices`, by v0.6.0 or later. `urmqtt-disk update-boot` refuses a disk with two slots
+    (`--in-place` overrides it, never during a trial).
+  - **virtio-net multiqueue**: a NIC that offers multiqueue with receive-side scaling gets one queue pair per data
+    core from the first boot (`devices.virtio_net_queues = "auto"`); every other NIC is as before. `"single"`
+    (format 19) restores one pair.
+  - **virtio devices may offer `VIRTIO_F_ACCESS_PLATFORM`**: the kernel now accepts it (no change for devices that do
+    not offer it, which is every default QEMU and cloud device).
+  - **Per-connection TCP state grows from 112 to 128 bytes** on every image (16-byte addresses).
+  - **Off unless you turn them on**: IPv6 (IPv6 frames are dropped and counted as before), the metrics endpoint (TCP
+    9100), the outbound log connection, the IOMMU (`devices.iommu = "off"`), run-time accounts
+    (`limits.max_runtime_accounts = 0`: the control channel refuses account commands), the console passphrase, the
+    A/B confirmation (`[update]` defaults: a trial boot confirms itself after 60 s).
+  - Every kernel prints a `build: <version> (A/B protocol 1, store schema N, configuration formats up to M)` line; new
+    `$SYS/broker/` topics, info-query fields and statsd names are added, none is changed.
+  - The open image is no longer byte-identical to a v0.5.x build of the same inputs (the kernel is a library now,
+    ADR-335); it is still reproducible (`make repro`) and release hashes change as with any release.
+- **Turning IPv6 on opens every listening port to IPv6 clients too**: a firewall in front must allow (or deny) the
+  same ports over IPv6, and allow-lists without IPv6 networks keep refusing IPv6 clients. Metrics need
+  `metrics.allow_from` (required; no "anywhere").
+- **Downgrade effects**: a v0.5.x kernel refuses the migrated database (above), a configuration of format 14 or newer
+  (by its version, at boot) and a data disk with console key slots (an unknown superblock flag). A v0.5.x kernel
+  boots a two-slot disk (it ignores the standby entry) but never counts, confirms or switches: do not activate a
+  slot with it; going back to v0.5.x on such a disk is `update-boot --in-place` (no way back from there) or staying on
+  v0.6.x. v0.5.0's `urmqtt-disk update-boot` does not know seals: on a sealed disk it can leave a disk its loader
+  refuses (fail closed, no data lost). To go back to v0.5.0: pack the same configuration with no new key (format 13
+  or lower) into the v0.5.0 template and give it the data disk backed up before the update, or a new disk;
+  docs/RELEASE.md section 6.
+- **Updates from now on**: on a disk with two slots, `urmqtt-disk slots stage DISK --image <release>.img --sums
+  SHA256SUMS --sig SHA256SUMS.minisig --pubkey minisign.pub --write`, then `slots activate`; the kernel confirms
+  itself or goes back (docs/OPERATE.md "Boot slots and updates", docs/DEPLOY.md 8b). A sealed (Secure Boot) disk stages only an ESP
+  sealed to its configuration (`sign-iso ... --esp-out`, `slots stage --replace-config`).
+
+**Limits, stated plainly.** Alpha: fit for trials and pilots whose operator reads docs/KNOWN-ISSUES.md, not for
+unattended production. **Nothing of this release ran on a VPS, on KVM or on physical hardware**: QEMU only (HVF, TCG;
+the IOMMU models, the multiqueue rig and the IPv6 router are QEMU's), and the x86_64 `accounts` smoke group needs
+KVM (one 100 000-iteration check takes 5 to 8 s under TCG). Several items are delivered in part and say so:
+**A/B updates** do not convert a disk prepared before v0.6.0, do not count a kernel that dies before its block
+driver runs (A295-W1), have no firmware anti-rollback and no staging over the network; **Secure Boot** has no
+version counter (H8-W6 stays open in part), no shim/MOK (firmware that trusts only Microsoft's keys cannot boot
+these images), no signed `dbx` tooling for real firmware, and no release image is signed (the project holds no
+Secure Boot key; the universal suites are run by hand, not in CI); **the console passphrase** keeps the broker down
+after every reboot until a person types it, and the superblock is plaintext, so the passphrase must be strong; TPM
+sealing and network unlock are not built; **the IOMMU** runs on QEMU's models only, with no interrupt remapping and
+no fault interrupt; **multiqueue** has not run on KVM with vhost; **IPv6** has no fragment reassembly, no ICMPv6
+errors, one global address, no DHCPv6, UDP stays IPv4 (SNTP, syslog, statsd, the log collector) and Neighbour
+Discovery is unauthenticated; **the outbound connection** has one user (log shipping, an IPv4 literal, no client
+certificate, at-most-once); **metrics** are plain HTTP behind an allow-list; **the kernel as a library** has no
+driver interface for a non-virtio NIC, disk or entropy source; **the builder's encrypted project** has no recovery
+for a forgotten passphrase. The builder test "the build ends in a result card" fails without the emulator runtime
+(`make builder-emulator`). The new builder texts are AI translations, unreviewed. The rest of v0.5.0's limits is
+unchanged: ROADMAP NEXT-8 (export bridge), NEXT-10 (DNS) and LATER-1 (clustering) are not started.
+
+### Added
+
+- **IPv6** (ROADMAP NEXT-1, ADR-330 to ADR-334): `network.ipv6 = "off" | "slaac" | "static"`, `ipv6_address`,
+  `ipv6_gateway` (format 23). Link-local address from the MAC (EUI-64) and one global address from the first /64
+  prefix of the router's advertisements (the default router and the MTU from them), or a static address and gateway;
+  duplicate address detection on every address. Every listener (TLS, WebSocket, plaintext, metrics) is dual stack;
+  an IPv6 /64 counts as one source for `limits.max_connections_per_ip`, `limits.max_handshakes_in_flight_per_ip` and
+  the plaintext and WebSocket tables; `plaintext.allow_from` and `metrics.allow_from` take IPv6 networks; multiqueue
+  NICs are asked for TCP/IPv6 RSS. Extension headers bounded (4, 256 bytes), fragments dropped and counted, Neighbour
+  Discovery answers rate-limited, MLD queries answered. `$SYS/broker/net/ipv6/...`, `net.ipv6` in the info reply,
+  `urmqtt_ipv6_*` metrics, console `status` lines. Fuzz `ipv6_nd` (it found that a multicast "prefix" in an RA made a
+  multicast address: fixed), `net_frame`, `tcp_segment` over both families, the RFC 9293/5961 scripts rerun over
+  IPv6, smoke group `ipv6` (SLAAC against QEMU's router, IPv6 only, dual stack), `scripts/run-qemu.sh --net6`,
+  `scripts/ipv6-relay.py`.
+- **Prometheus metrics** (ROADMAP NEXT-9, ADR-290 to ADR-294): `[metrics] enabled = true` serves `GET /metrics` on TCP
+  9100 as plain HTTP/1.1 to the networks in `metrics.allow_from` (required, at most 16, no `0.0.0.0/0`) and answers
+  nobody else. Every `$SYS/broker/...` number is a metric (about 170 series with four cores) made from the same
+  `Info`, with base units, `_total` counters, `_info` gauges and labels that are bounded and never chosen by a client;
+  text format 0.0.4, or OpenMetrics 1.0.0 when `Accept` prefers it. One bounded request (2048 bytes, 24 headers),
+  GET and HEAD, one answer per connection, a deadline, 8 connections and 2 per address per core, 20 scrapes a
+  second per core. New crate `urmqtt-http`, fuzz `http_request` and `metrics_render`, smoke group `metrics`, OPERATE.md
+  "Metrics for Prometheus" (scrape configuration, names, alert rules). Configuration format 16.
+- **A/B updates with rollback** (ROADMAP NEXT-11, ADR-295 to ADR-299): two boot slots on new installs;
+  `urmqtt-disk slots stage | activate | status | confirm | rollback` (a release checked against its minisign signature
+  and SHA-256, or an own ESP with `--unsigned`; a dry run without `--write`; 3 trial boots by default, `--tries
+  1..7`); the kernel counts a trial boot, confirms itself once the store is open and a listener has been up for
+  `update.confirm_after_s` (60 s), and, after a crash, a fatal error, a watchdog reset or no confirmation within
+  `update.trial_timeout_s` (900 s) with no trial left, switches the boot entry back and resets into the previous
+  release; the failed slot is marked bad. `[update] confirm = "operator"` waits for the signed control messages
+  `boot-confirm` and `boot-rollback` (bound to the boot disk's GUID). Downgrade rules: a kernel from before v0.6.0 and
+  one with an older store schema are always refused, an older release needs `--allow-downgrade`, a newer schema
+  `--one-way` (the previous slot is then marked bad). Every write of every step is tested for a power cut (host, and
+  QEMU on aarch64 and x86_64 UEFI). Configuration format 17 (`[update]`), control commands 7 and 8, smoke group `ab`
+  (also on the universal image: x86_64 BIOS and UEFI, aarch64), fuzz `boot_slots`.
+- **Password accounts at run time** (ROADMAP NOW-15, ADR-285 to ADR-289): the signed control commands `set-account`
+  and `remove-account` (`urmqtt-control set-account --id ID --password-stdin [--class full|read-only|write-only]`;
+  the operator's machine hashes with PBKDF2-HMAC-SHA-256 and only the hash is signed), accounts that log in on the
+  plaintext and WebSocket listeners at once, without a reboot, and are kept on the data disk (schema 6, hashes only).
+  A removed account, a changed password or class closes that account's live connections (5.0: DISCONNECT 0x98). A
+  class only narrows the listener's patterns. `limits.max_runtime_accounts` (default 0, at most 1024; format 15); the
+  image's own accounts and the service, operator and control identities cannot be shadowed; audit lines carry no
+  secret. Fuzz `control_account`, smoke group `accounts`.
+- **A limit on established TLS connections per source address** (ROADMAP NOW-14, ADR-280):
+  `limits.max_connections_per_ip`, default 1024, 0 turns it off (format 14 for any other value); a table of 32 768
+  addresses (beyond it a new address is let through uncounted and counted); counters
+  `$SYS/broker/connections/per_address/...`. Fuzz `source_limit`, `tools/attack established-flood`, smoke group
+  `conn-limit`.
+- **virtio-net multiqueue with RSS** (ROADMAP NEXT-6, ADR-310 to ADR-314): one queue pair per data core when the
+  device offers MQ, the control queue and RSS; the device's RSS is programmed with the broker's own Toeplitz key and
+  table so each flow arrives on its owner's queue; per-queue MSI-X vectors with ADR-270's probation and fallback; a
+  frame of another core goes to core 0 and is counted. `devices.virtio_net_queues = "auto" | "single"` (format 19),
+  `$SYS/broker/net/queue*`, `urmqtt_network_queue_*` metrics, `scripts/run-qemu.sh --tap`, `scripts/mq-rig.sh`, smoke
+  group `mq`, fuzz `virtio_net_mq`.
+- **An outbound TCP client and log shipping over TLS 1.3** (ROADMAP NEXT-7, ADR-315 to ADR-319; D-6): active open in
+  `urmqtt-tcp` (SYN-SENT, retransmission, RFC 6528 sequence numbers, ephemeral ports), a TLS 1.3 client that trusts only
+  the configured anchors, and `observability.log_tls = "a.b.c.d:port"` with `log_tls_ca`, `log_tls_name` and
+  `log_tls_queue_kb` (RFC 5425 octet counting, a bounded queue, reconnect with jittered backoff; format 20). Off unless
+  configured; no remote input chooses a destination. Fuzz `tcp_active` and `tls_client`, smoke group `logtls`.
+- **DMA remapping** (ROADMAP LATER-5, ADR-305 to ADR-307): `devices.iommu = "off" | "auto" | "require"` (format 18;
+  default `off`): Intel VT-d, AMD-Vi and Arm SMMUv3 driven from the firmware's tables, every device's DMA blocked from
+  before the first driver, a domain per device with only its own buffers; blocked DMA counted and logged
+  (`$SYS/broker/iommu/...`); `require` refuses to boot where it cannot translate. Smoke group `iommu`, fuzz
+  `iommu_tables`, `scripts/run-qemu.sh --iommu`.
+- **Secure Boot completed** (ROADMAP LATER-6, ADR-320 to ADR-324): an image signed with your own key is sealed (the
+  installed disk's `limine.conf` pins the configuration by BLAKE2b), so the installed disk, the raw image and an A/B
+  slot boot under Secure Boot (AUDIT H8-W1); sealed images take only their own configuration (installer, `urmqtt-disk`,
+  `urmqtt-config` refuse another before writing); `scripts/sign-loaders.sh sign-iso` signs an ISO the builder page
+  configured, without building a kernel (H8-W2); revocation by `dbx` hash (`authenticode`, `ovmf-vars --dbx-hash`);
+  aarch64 enforcement tested with AAVMF. docs/secure-boot-keys.md; smoke `secureboot` from 10 to 30 checks; fuzz
+  `seal_pins`.
+- **A disk key outside the image** (ROADMAP LATER-7, ADR-325 to ADR-329): `storage.disk_key_source = "console"` (format
+  22). The data partition's random key is wrapped (RFC 3394 under PBKDF2 of a passphrase) in up to two key slots of
+  the superblock; the kernel asks on the console at every boot, before the store opens and before any listener;
+  `change` at the prompt changes the passphrase; `urmqtt-disk keys DISK [add | change | remove | unwrap]` and
+  `--passphrase-file`. A RAM store asks for nothing. Smoke group `unlock`, fuzz `disk_keyslot`, `scripts/run-qemu.sh
+  --serial-in`.
+- **Encrypted project files on the builder page** (ROADMAP NOW-16, ADR-300): "Project and secrets" saves the whole
+  form, secrets included, as `<name>.urmqtt-project` (PBKDF2 600 000 rounds, AES-256-GCM) or as an encrypted copy in
+  the browser; "Wipe secrets from memory"; 40 new texts in each of the 15 languages; the page makes no new request.
+  The builder also offers `storage.encryption` and `storage.disk_key_source`, the `[metrics]`, `[update]`, IPv6 and
+  log-shipping keys and the new limits.
+- **The kernel as a library** (ROADMAP NOW-18, ADR-335 to ADR-339): `urmqtt_kernel` with an `Edition` API (PCI drivers
+  by ID, never a virtio function; configuration keys in the reserved tags `0xF000..=0xFFFE`, TOML `[ext.<section>]`;
+  four boot hooks); the open image is `urmqtt_kernel::image!(Edition::OPEN)` and refuses an edition's
+  configuration. `examples/edition`, `make edition-example`, `mkiso.sh --config-slot`, smoke group `edition`, fuzz
+  `cfg_ext`, `scripts/check-lock-subset.py`; docs/EDITIONS.md 5, ARCHITECTURE 8b.
+
+### Changed
+
+- `urmqtt-disk update-boot` refuses a disk with two slots without `--in-place`; `slots rollback` refuses a previous
+  slot whose kernel cannot read the store on the disk; `urmqtt-disk encrypt | decrypt | rekey` empty the key slots when
+  they change the key.
+- `$SYS`: the first pass runs when the shard is made, outside the handler watchdog.
+- CI: new smoke shards (`metrics`, `conn-limit`, `ab`, `unlock`, `logtls`, `edition`, `ipv6`, `mq`, `iommu`) and fuzz
+  targets; the example edition is formatted, linted, built and smoke-tested; its lockfile may hold nothing the
+  workspace's does not.
+- The builder tests compare with the tree's `FORMAT_VERSION` instead of each item's own number.
+
+### Security
+
+- Per-address limits cover the established connections (ADR-280); IPv6 sources are keyed by their /64.
+- The IOMMU closes DMA by a device that is not its driver's buffer (LATER-5); a Secure Boot enforcing machine boots an
+  installed disk and refuses another configuration (LATER-6); a stolen ISO or a copied data disk no longer opens the
+  data when `storage.disk_key_source = "console"` (LATER-7).
+- The metrics port answers only the networks listed; any other address gets nothing.
+- The outbound client trusts only the configured anchors and the configured name, by the wall clock.
+- Found and fixed while building it: a multicast "prefix" in a Router Advertisement made a multicast address
+  (`ipv6_nd` fuzz); the sum of arbitrary counters in `sys.rs` `by_code` could overflow (`saturating_add`, found by the
+  `metrics_render` fuzz target); a certificate chain larger than one TLS record during the outbound handshake; log
+  records written into a connection the collector had closed; a stranded standby slot adopted by the firmware; a
+  sealed disk accepting an unsealed ESP; `keys unwrap` emptying the slots before writing `--key-out`. The audit
+  inventory and the code-scanning triage (docs/audit/) were refreshed.
+
 ## [0.5.0] - 2026-11-09
 
 The **MQTT 5.0 and QoS 2 release**: everything since v0.4.2 (the first release signed with the release key
@@ -740,7 +956,8 @@ production images embed the operator's own keys and are built with
 - M1: Bootable UEFI ISO, console, decoded exception reports, PSCI, `make run`/`smoke`, CI smoke job.
 - M0: CI and CD: lint, host tests, kernel build, cargo-deny, fuzzing, CodeQL, Scorecard, Dependabot and a release workflow with provenance.
 
-[Unreleased]: https://github.com/zeljan-alduk/urMQTT/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/zeljan-alduk/urMQTT/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/zeljan-alduk/urMQTT/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/zeljan-alduk/urMQTT/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/zeljan-alduk/urMQTT/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/zeljan-alduk/urMQTT/compare/v0.4.0...v0.4.1

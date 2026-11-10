@@ -12,11 +12,12 @@ the schedule.
 
 ## 1. Where we are
 
-- **Release.** v0.4.2 is the latest published release (tags v0.1.0 to v0.4.2), the first signed with the release
-  key and without throwaway certificates; v0.5.0 (QoS 2, MQTT over WebSocket, MQTT 5.0, the NOW-13 work) is prepared
-  (CHANGELOG 0.5.0, docs/release-day-v0.5.0.md). Scope: a VPS or VM under KVM only (PLAN.md, "First release scope");
-  bare metal (X12 to X16) and the hardware part of H8 come after it. The text below this bullet in section 1 is as of
-  v0.3.0.
+- **Release.** v0.5.0 is the latest published release (tags v0.1.0 to v0.5.0; v0.4.2 was the first signed with the
+  release key and without throwaway certificates). v0.6.0 is prepared on `release-v0.6.0` (CHANGELOG 0.6.0,
+  docs/release-day-v0.6.0.md): the NOW-14, NOW-15, NOW-16 and NOW-18 items, NEXT-1, NEXT-6, NEXT-7, NEXT-9 and
+  NEXT-11, and LATER-5 to LATER-7 are delivered, six of them in part (their entries below say what is left). Scope: a
+  VPS or VM under KVM only (PLAN.md, "First release scope"); bare metal (X12 to X16) and the hardware part of H8
+  come after it. The text below this bullet in section 1 is as of v0.3.0.
 - **CI.** The owner reports `main` green on `68d4820`; not re-checked from this checkout (no network was used).
   At the release candidate: 934 workspace tests, smoke aarch64 HVF+TCG 308/0, universal 59/0, x86_64 TCG 150/1
   (`log-slow-flood`, fixed afterwards), `make repro` identical (PROGRESS, "Release candidate v0.3.0").
@@ -236,22 +237,24 @@ release signed with it is v0.4.2.**
   in PERFORMANCE §7.5, measured again on top of ADR-268/269. Not yet run on either VPS (the netcup vITS and the
   Contabo KVM are the targets). Open: the VPS pair, the per-CPU heap cache.
 
-**NOW-14. A limit on established TLS connections per source address.** S.
+**NOW-14. A limit on established TLS connections per source address.** S. **Done (v0.6.0, ADR-280).**
 - What: a per-address cap for established connections, like `plaintext.max_connections_per_ip` already has.
 - Why: TODO.md "Known limits": today only handshakes in flight are limited per address
   (`limits.max_handshakes_in_flight_per_ip`, AUDIT.md §6b).
 - Risk: devices behind one NAT share an address; the default must be generous and the refusal counted.
 - Verify: host test at the bound; a `tools/attack` scenario that opens many connections from one address.
+- Done (v0.6.0, ADR-280): `limits.max_connections_per_ip`, default 1024 (0 = off), configuration format 14; the MQTT and WebSocket ports together, all cores added up; over the limit the SYN gets no answer; counters under `$SYS/broker/connections/per_address/`; smoke group `conn-limit`, fuzz `source_limit`, `tools/attack established-flood`. An IPv6 /64 counts as one address (NEXT-1). Left out: a per-identity limit, /24 grouping, eviction, an exemption list; beyond 32 768 tracked addresses a new one is let through uncounted (fail open, counted).
 
-**NOW-15. Plaintext accounts at run time.** M.
+**NOW-15. Plaintext accounts at run time.** M. **Done (v0.6.0, ADR-285 to ADR-289).**
 - What: a signed control message type that adds and removes `[plaintext]` password accounts, with the hashes
   kept on the data disk.
 - Why: PROGRESS P1 "Not done / open"; SECURITY.md residual risk "Plaintext accounts cannot be added or removed at
   run time" (ADR-230).
 - Risk: the control channel's replay and window logic gets a new message type; it needs its own fuzz input.
 - Verify: `control-scenarios.py` cases (add, login, remove, replay refused), `control_message` fuzzing.
+- Done (v0.6.0, ADR-285 to ADR-289): the signed control messages `set-account` and `remove-account` (the operator's machine hashes, only the hash is signed), accounts of the plaintext and WebSocket listeners at run time, three classes (`full`, `read-only`, `write-only`), `limits.max_runtime_accounts` (default 0, configuration format 15), store schema 6 (`accounts`, one way), live connections cut on a change; fuzz `control_account`; smoke group `accounts`. Left out: per-account ACL patterns, listing accounts over the network, bulk import, password expiry, per-account rate limits, Argon2 (D-16), accounts for the TLS listener. Not run: the `accounts` smoke group on x86_64 (under TCG one 100 000-iteration check takes 5 to 8 s; it needs KVM).
 
-**NOW-16. Encryption at rest on the builder page.** M.
+**NOW-16. Encryption at rest on the builder page.** M. **Done in part (v0.6.0, ADR-300).**
 - What: the key dialog ADR-240 asks for (generate in the browser, download, import), so the page can write
   configuration format 4.
 - Why: ADR-240 "The builder page does not offer it yet"; CHANGELOG 0.3.0 limits.
@@ -259,6 +262,7 @@ release signed with it is v0.4.2.**
   (ADR-226 rules).
 - Verify: the page's headless tests (the produced blob equals `urmqtt-config pack` byte for byte; no key in
   storage or requests), as for the TLS key today.
+- Done in part (v0.6.0, ADR-300): the page keeps the whole form, secrets included, as an encrypted project file or an encrypted copy in the browser (PBKDF2 600 000 rounds, AES-256-GCM, nothing new sent, CSP unchanged); no configuration or kernel change. Left: the disk-key file dialog (generate, download, import) of the original text; the page offers `storage.encryption` and, with LATER-7, `storage.disk_key_source`, but the key file `storage.disk_key` stays off the page. Also not done: a memory-hard KDF in the page, passphrase recovery, true zeroisation of JavaScript strings.
 
 **NOW-17. CI gaps that hide regressions.** S.
 - What: wire `SMOKE_ONLY=secureboot` into CI on an x86_64 runner with `SMOKE_REQUIRE_SB=1`; the X1 "CI KVM
@@ -266,7 +270,7 @@ release signed with it is v0.4.2.**
 - Why: H8-W4 ("the CI job for the x86_64 test is not wired"); README X1 "CI KVM probe not done".
 - Risk: none. Verify: the jobs run on a pull request.
 
-**NOW-18. Kernel as a library.** M.
+**NOW-18. Kernel as a library.** M. **Done in part (v0.6.0, ADR-335 to ADR-339).**
 - What: a driver registration API for out-of-tree drivers, generic PCI ID binding, and a reserved configuration
   tag range; the open kernel's behaviour unchanged, `make repro` identical.
 - Why: [EDITIONS.md](EDITIONS.md) §5. The driver framework's tables (`virtio::registry::KINDS`,
@@ -276,6 +280,7 @@ release signed with it is v0.4.2.**
   not be able to change how the open drivers bind, and the const checks of `vdev/mod.rs` must keep working.
 - Verify: `make repro` identical before and after; smoke and host tests unchanged; a test driver registered from
   a crate outside the workspace binds a QEMU device by PCI ID and reads a key from the reserved range.
+- Done in part (v0.6.0, ADR-335 to ADR-339): the kernel is the library `urmqtt_kernel`, the open image one line on top of it (`image!(Edition::OPEN)`); an edition adds PCI drivers bound by ID (never a virtio function), configuration keys in the reserved tags `0xF000..=0xFFFE` (`[ext.<section>]`, refused by every open image) and four boot hooks; `examples/edition`, `make edition-example`, `mkiso.sh --config-slot`, smoke group `edition`, fuzz `cfg_ext`, `scripts/check-lock-subset.py`. Left (ADR-339): drivers for a NIC, a disk or an entropy source that is not virtio (the data path and the boot disk selection are virtio only), interrupts for an edition's device, builder-page and schema export of its keys, the universal ISO, installer and Secure Boot signing exercised with an edition's kernel, the open host tools seeing an edition's `[ext]` slot, the private repository (not created) and any publication.
 
 **NOW-19. Honour the MTU the network announces.** S. **Done (ADR-264).**
 - What: use the MTU from DHCP (option 26) or the interface's configured value instead of assuming 1500 bytes for
@@ -297,7 +302,7 @@ release signed with it is v0.4.2.**
 These change what devices can do. Each is larger than the Now items and most add input parsing; sizes assume the
 same test standard as M8 to M16 (codec fuzzing, Kani harnesses, mosquitto interop).
 
-**NEXT-1. IPv6 with SLAAC and static addresses.** L.
+**NEXT-1. IPv6 with SLAAC and static addresses.** L. **Done (v0.6.0, ADR-330 to ADR-334).**
 - What: Ethernet type 0x86DD, ICMPv6 with Neighbour Discovery, SLAAC and a static address/prefix, dual stack in
   the per-core `Iface`, TCP and SYN cookies over IPv6, the Toeplitz steering for IPv6 tuples, IPv6 CIDRs in
   `plaintext.allow_from`, SNTP to IPv6 servers.
@@ -306,6 +311,7 @@ same test standard as M8 to M16 (codec fuzzing, Kani harnesses, mosquitto intero
 - Risk: high parsing surface (extension headers, Neighbour Discovery options); needs the `net_frame` fuzzer extended and the
   RFC 5961 tests duplicated for IPv6. Memory per connection grows with 128-bit addresses (M15 budget).
 - Verify: QEMU user networking supports IPv6; smoke scenarios for SLAAC, static, dual stack; mosquitto over IPv6.
+- Done (v0.6.0, ADR-330 to ADR-334): `network.ipv6 = "off" | "slaac" | "static"` with `ipv6_address` and `ipv6_gateway` (configuration format 23); link-local plus one global address, DAD, Router Advertisement (prefix, router, MTU); every listener dual stack, an IPv6 /64 one source for the per-address limits; IPv6 networks in `plaintext.allow_from` and `metrics.allow_from`; RSS asked for TCP/IPv6; fuzz `ipv6_nd` and extended `net_frame`, `tcp_segment`; smoke group `ipv6`. Left out: fragment reassembly, ICMPv6 errors and path MTU discovery, a second prefix, RFC 8981 and 7217 addresses, DHCPv6, NUD, SEND; UDP over IPv6 (SNTP, syslog, statsd and the log-shipping collector stay IPv4); `plaintext.ip_identities` IPv4 only; checksum offload. Not measured: throughput on a tap/multiqueue rig (the QEMU user-network figures differ by more than the change) and nothing on a VPS.
 
 **NEXT-2. QoS 2.** M.
 - What: PUBREC/PUBREL/PUBCOMP with the packet-id state persisted per session; QoS 2 subscriptions granted at 2.
@@ -368,15 +374,16 @@ same test standard as M8 to M16 (codec fuzzing, Kani harnesses, mosquitto intero
   password inside TLS, origin allowlist, upgrade deadline; fuzz targets `ws_upgrade` and `ws_frames`, Kani, Miri,
   Autobahn|Testsuite (0 failed, docs/audit/ws-autobahn.md), smoke group `websocket` on both architectures.
 
-**NEXT-6. virtio-net multiqueue and RSS.** M.
+**NEXT-6. virtio-net multiqueue and RSS.** M. **Done (v0.6.0, ADR-310 to ADR-314).**
 - What: one queue pair per data core with the device's RSS, so core 0 stops copying every frame.
 - Why: ADR-032 ("virtio-net multiqueue + RSS is not implemented ... the hash already matches RSS"); README features
   "📋 later (needs tap/vhost to test)".
 - Risk: needs a Linux KVM host with tap/vhost for tests (QEMU user networking has no multiqueue).
 - Dependency: a test host (the Contabo VPS cannot nest; see D-9). Verify: smoke on tap with `mq=on`, dp-bench and
   the X11 rows re-measured.
+- Done (v0.6.0, ADR-310 to ADR-314): one queue pair per data core when the device offers MQ, the control queue and RSS, programmed with the broker's own Toeplitz key and table; one pair otherwise (QEMU's default, most VPSes); `devices.virtio_net_queues = "auto" | "single"` (format 19), per-pair counters, `scripts/mq-rig.sh`, smoke group `mq`, fuzz `virtio_net_mq`. Left: verification on a KVM host (vhost-net with eBPF RSS, interrupts to vCPUs other than 0, the throughput gain; D-9 open: tested under QEMU TCG in Docker only), multiqueue without RSS, HASH_REPORT, IPv6 hash types in the device, a table change at run time; on aarch64 with a GICv3 ITS only (QEMU TCG, the netcup ARM VPS) the worker pairs are polled.
 
-**NEXT-7. An outbound TCP client.** L.
+**NEXT-7. An outbound TCP client.** L. **Done (v0.6.0, ADR-315 to ADR-319).**
 - What: active open in `urmqtt-tcp` (today passive open only, ADR-033), with connection state, ISN generation
   without cookies, and a TLS client path.
 - Why: it is the prerequisite of bridging, webhooks, syslog over TLS, NTS and any cluster protocol; PROMPT.md §7.4
@@ -384,6 +391,7 @@ same test standard as M8 to M16 (codec fuzzing, Kani harnesses, mosquitto intero
 - Risk: high. It changes the server-only design of ADR-033 and the threat model (the broker starts connections).
   Owner decision (D-6).
 - Verify: the H3 model tests extended to active open; a loss-simulation test for the client side.
+- Done (v0.6.0, ADR-315 to ADR-319; D-6: built, off unless an image configures an outbound user): active open in `urmqtt-tcp`, a TLS 1.3 client, the first user log shipping over TLS (`observability.log_tls*`, configuration format 20); smoke group `logtls`, fuzz `tcp_active` and `tls_client`. Left out (ADR-319): DNS names (NEXT-10), a client certificate for the collector, IPv6 for the outbound connection, a proxy, keepalive on it, more than one outbound user at once exercised; delivery is at most once. NEXT-8 (the bridge) and NEXT-10 (DNS) are not started: the API they need (`kernel/src/outbound.rs`, `TlsLink`, `dial`, `RecordQueue`) exists.
 
 **NEXT-8. Export bridge.** M (after NEXT-7).
 - What: forward selected topics to an upstream broker or HTTP endpoint with a service identity, bounded queues
@@ -393,20 +401,21 @@ same test standard as M8 to M16 (codec fuzzing, Kani harnesses, mosquitto intero
 - Risk: unbounded queues are the obvious failure; AUDIT.md §6b needs a new row. Dependency: NEXT-7.
 - Verify: an upstream Mosquitto in the smoke rig; a stalled upstream must not grow the heap.
 
-**NEXT-9. Observability beyond statsd and syslog over UDP.** S (exporter) to M (in-kernel).
+**NEXT-9. Observability beyond statsd and syslog over UDP.** S (exporter) to M (in-kernel). **Done (v0.6.0, ADR-290 to ADR-294).**
 - What: either an OpenMetrics/Prometheus exporter outside the image that reads `$SYS` over MQTT or statsd, or an
   in-kernel HTTP endpoint; and TLS for log shipping once NEXT-7 exists.
 - Why: SECURITY.md residual risk "Syslog and statsd are plain UDP"; there is no Prometheus support in the repo.
 - Risk: an in-kernel HTTP listener contradicts "TCP 8883 only" (README); the exporter keeps the image unchanged.
   Owner decision (D-7).
 - Verify: the exporter's output against `$SYS/query/info` in a smoke scenario.
+- Done (v0.6.0, ADR-290 to ADR-294; D-7: built as an HTTP port in the kernel, plain, off by default): `[metrics]` (configuration format 16), `GET /metrics` on TCP 9100 for the networks in `allow_from` only, every `$SYS/broker` number as a metric (about 170 series, bounded labels), text 0.0.4 or OpenMetrics 1.0.0; TLS for log shipping came with NEXT-7 (ADR-318); fuzz `http_request` and `metrics_render`, smoke group `metrics`. Left out: TLS or mutual TLS on the metrics port (the allow-list is the control), Pushgateway, remote write and OTLP, histograms, per-client series, basic auth or a token; statsd stays plain UDP.
 
 **NEXT-10. A DNS resolver for configured names.** S to M.
 - What: a small stub resolver (UDP, the DHCP-supplied server) for SNTP and future upstream names.
 - Why: OPERATE.md "IPv4 literals, at most four: the broker has no DNS"; `time_sync.rs` says the same.
 - Risk: DNS answers are attacker-influenced input; needs a fuzz target. Verify: smoke with a QEMU DNS server.
 
-**NEXT-11. Updates and rollback: A/B boot entries.** M to L.
+**NEXT-11. Updates and rollback: A/B boot entries.** M to L. **Done in part (v0.6.0, ADR-295 to ADR-299).**
 - What: two kernel/configuration sets on the ESP with a boot counter and automatic fallback, so an update is not
   only the offline `urmqtt-disk update-boot`; a rollback-protection rule alongside (H8-W6).
 - Why: PLAN.md decision 6 ("A/B boot entries with rollback as a later step"); AUDIT.md H8-W6 ("No downgrade
@@ -414,6 +423,7 @@ same test standard as M8 to M16 (codec fuzzing, Kani harnesses, mosquitto intero
 - Risk: the kernel never writes the ESP today (ADR-217, ADR-254); a boot counter needs a write path or a
   firmware variable. Verify: power cut during an update in the fault loop; a deliberately broken new kernel falls
   back.
+- Done in part (v0.6.0, ADR-295 to ADR-299): a new install has two boot slots; `urmqtt-disk slots stage | activate | status | confirm | rollback` (a signed release or an own ESP, downgrade rules, trial boots), the kernel counts, confirms itself after `update.confirm_after_s` (or by the signed `boot-confirm`) and switches back by itself (`[update]`, configuration format 17; `boot-rollback`); every write of every step tested for a power cut; smoke group `ab`; fuzz `boot_slots`. Left: converting a disk prepared before v0.6.0 (it stays single-slot and keeps `update-boot`), a kernel that dies before its block driver runs is not counted (A295-W1; needs the Boot Loader Interface one-shot entry, i.e. UEFI runtime services in the kernel), firmware-level anti-rollback (H8-W6 proper), staging over the network (needs an ESP writer in the kernel), `$SYS` topics for the slot state, power cuts on the BIOS path.
 
 ### Later: scale-out, more clouds, bare metal (12 items)
 
@@ -434,15 +444,18 @@ inventory (TODO.md). Prerequisites: H4b IOMMU (ADR-176) and NOW-8.
 
 **LATER-5. H4b: IOMMU (VT-d, AMD-Vi, SMMUv3).** M to L. ADR-176 deferred it with bare metal; SECURITY.md residual
 risks. Verify: the planned `iommu-dma-blocked` scenario.
+- Done in part (v0.6.0, ADR-305 to ADR-307): `devices.iommu = "off" | "auto" | "require"` (format 18, default `off`): VT-d, AMD-Vi and SMMUv3 driven from the firmware's tables, a domain per device holding its own buffers, blocked DMA polled, counted and logged; smoke group `iommu`, fuzz `iommu_tables`. Left: any real hardware (QEMU 11.1's models only, under TCG and HVF; not under KVM), interrupt remapping, reserved regions (RMRR, IVMD, RMR), queued invalidation, scalable mode, ATS, a fault interrupt, unmapping, the throughput cost.
 
 **LATER-6. Secure Boot completed.** M. H8-W1 (installed disk does not boot under Secure Boot), H8-W2 (a signed
 image cannot be configured afterwards), H8-W4 (aarch64 enforcement, Proxmox, a physical PC untested), H8-W6
 (downgrade). Needs a project key (D-2) and, for W1, a per-machine ESP re-signed by the key owner (ADR-251).
+- Done in part (v0.6.0, ADR-320 to ADR-324): H8-W1 and H8-W2 closed (an installed disk boots under Secure Boot: a signed image is sealed to its configuration; `scripts/sign-loaders.sh sign-iso` signs an ISO the builder page configured), revocation by `dbx` hash (`authenticode`, `ovmf-vars --dbx-hash`), aarch64 enforcement tested with AAVMF (H8-W4 in part); docs/secure-boot-keys.md; smoke `secureboot` grew from 10 to 30 checks; fuzz `seal_pins`. Left: a version counter (H8-W6 stays open in part), signed `dbx` update tooling for real firmware, shim/MOK, a release signed with a project key (D-2), Proxmox, a physical PC and cloud firmware untested, the BIOS path has no signatures (H8-W3), the universal suites are run by hand (not in CI), the BLI boot-once entry (A295-W1).
 
 **LATER-7. A disk key that is not in the image.** L. Today the key comes only from the configuration in the ISO
 (ADR-240), so a stolen ISO defeats encryption at rest. ADR-254 estimates three to four weeks for TPM sealing and
 recommends doing it with bare metal, after Secure Boot; the alternatives it lists (network key release, a
 confidential VM) are owner decisions (D-10).
+- Done in part (v0.6.0, ADR-325 to ADR-329; the passphrase case of D-10 is built; the other options stay open): `storage.disk_key_source = "console"` (format 22): the disk key is wrapped under a passphrase in up to two key slots of the superblock, typed on the console at every boot before anything listens; `urmqtt-disk keys` and `--passphrase-file`; smoke group `unlock`; fuzz `disk_keyslot`. Left: TPM 2.0 sealing (ADR-254), network unlock, a key file on a separate device, confidential VMs, rekey at boot or online, the VNC keyboard path exercised in QEMU. The trade-off: after any reboot the broker stays down until a person types the passphrase.
 
 **LATER-8. aarch64 bare metal and other ARM hosts, X15.** L. GICv3 ITS for MSI (X86-PLAN F11), Ampere servers,
 Raspberry Pi; the Pi-under-KVM and Hetzner CAX runs in TODO.md are S each and could move to Now if hardware is at hand.

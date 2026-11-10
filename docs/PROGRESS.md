@@ -3,6 +3,96 @@
 One entry per milestone: what was done, what was measured and the known gaps. Newest entries first down to H7; the entries from M0 to S6 follow in the order they were written.
 Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptance-criteria).
 
+## Release candidate v0.6.0 (2026-11-09)
+
+Everything for the release except publishing: nothing was tagged, signed or uploaded, and no server, VPS or cloud
+was touched by this preparation (no ssh, no `deploy/prod`, no production key, nothing in aldotech-web). The commands for
+the day are in `docs/release-day-v0.6.0.md`; the generic steps in `docs/RELEASE.md` (v0.6.0 is now its worked
+example). The branch is `release-v0.6.0`, the merge of the twelve v0.6.0 branches (NOW-14, NOW-15, NOW-16, NOW-18,
+NEXT-1, NEXT-6, NEXT-7, NEXT-9, NEXT-11, LATER-5, LATER-6, LATER-7) and their review fixes on top of v0.5.0. What the
+release contains: IPv6 (ADR-330 to ADR-334), Prometheus metrics (ADR-290 to ADR-294), A/B updates with rollback
+(ADR-295 to ADR-299), run-time password accounts (ADR-285 to ADR-289), the per-address connection limit (ADR-280),
+virtio-net multiqueue with RSS (ADR-310 to ADR-314), the outbound TCP client with log shipping over TLS (ADR-315 to
+ADR-319), the IOMMU (ADR-305 to ADR-307), Secure Boot completed (ADR-320 to ADR-324), the console disk key (ADR-325 to
+ADR-329), encrypted builder projects (ADR-300) and the kernel as a library (ADR-335 to ADR-339). Configuration format
+23, store schema 6 (5 to 6 one way); format 21 and schema 7 are reserved and unused.
+
+**Done**
+
+- Version 0.6.0 (workspace `Cargo.toml`, `Cargo.lock`, `fuzz/Cargo.lock` and `examples/edition/Cargo.lock`: the
+  workspace crates only, no dependency changed); the README badge, banner, feature table and configuration table (the
+  keys of the new items), the DEPLOY and OPERATE examples (the `build:` line now says schema 6 and formats up to 23),
+  the issue forms' example tag. The builder's manifest generator (`tools/builder/web/bundle.mjs`) names no version: the
+  page built from this tree reports format 23 (`urmqtt-cfg23.wasm`, keys `721316B961DCB94B` and `9229E05252D01F8E`).
+- CHANGELOG `[0.6.0] - 2026-11-09` with a summary, "Upgrading from v0.5.0" (the one-way schema 5 to 6 migration and the
+  backup to take first; formats up to 23 and which key needs which; the behaviour changes with an unchanged
+  configuration: 1024 connections per address, two-slot layout on new installs only, multiqueue negotiation, 128-byte
+  TCP state; downgrade effects), "Limits, stated plainly", Added, Changed, Security; compare links, empty Unreleased.
+  Release notes in `docs/release-notes-v0.6.0.md` and RELEASE.md section 7; `docs/release-day-v0.6.0.md` (the builder
+  page redeploy before the tag: format 13 on the live page against 23 here; the template check with formats 13, 14 and
+  23; the clang 18.1.3 reproducibility note; rollback with the migrated database).
+- ROADMAP: NOW-14, NOW-15, NEXT-1, NEXT-6, NEXT-7 and NEXT-9 are marked done with their ADR numbers; NOW-16, NOW-18,
+  NEXT-11, LATER-5, LATER-6 and LATER-7 are marked done in part with exactly what is left (each entry, and section 1's
+  release line). KNOWN-ISSUES (status as of v0.6.0; the migration, the connection limit, A/B, metrics, accounts, bridging
+  rows), FIRST-HOUR (from v0.4.1 to v0.6.0: the release key, the `build:` line, and a section "Beyond the first hour"
+  with MQTT 5 and QoS 2, WebSocket, run-time accounts, Prometheus, IPv6, A/B updates and the console passphrase),
+  README.
+- **Compatibility, with this tree's v0.6.0 template** (`make dist ENV=release VERSION=v0.6.0`): a format-13 file (TLS
+  files, CA, control key, `network.mtu = 1460`, `limits.max_shared_groups = 64`) packs (`show`: version 13), with
+  `limits.max_connections_per_ip = 2048` added it is format 14, with `network.ipv6 = "slaac"` as well format 23: all
+  pack. The refusal by an older template is covered by `tools/config/tests/cli.rs` (`templates_of_earlier_releases_take_what_their_kernel_reads`,
+  which now has a `v0.6.0` row at 23 beside the format 14, 15, 16, 17, 18 and 22 rows). The published v0.5.0 template
+  was not downloaded (no network was used): step 6 of the release-day list does that with the real file.
+- Version-dependent text kept as it was on purpose: the tests and keyring examples that name v0.5.0 as a tag
+  (`key-rotation.test.mjs`, `test-mirror-releases.py`, `keyring.rs`) are fixtures, not the current version.
+
+**Gates run on this Mac** (macOS 26.3, Apple M4 Pro, a sibling worktree, not nested; Apple clang 17 for the C parts)
+
+- `cargo fmt --all --check` clean; `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo test
+  --workspace`: **1596 passed, 0 failed, 16 ignored**; `make clippy-kernel` and `make check-x86` clean; `make build`
+  aarch64 (4 588 496 B, the dev kernel with the selftest feature) and `make build ARCH=x86_64` (4 766 904 B).
+- `typos`, `actionlint`, `shellcheck` (CI's file list) clean; `scripts/check-known-issues.py` ok;
+  `scripts/audit-inventory.py` regenerated (no change: it holds no version); `scripts/check-release-key.sh` ok.
+- `make builder` and `make builder-emulator`: format 23 page, 20 files; `make builder-test` **165 of 166 passed, 0
+  failed, 1 skipped** (with the emulator runtime the "the build ends in a result card" test passes, which it does not
+  without it); `cargo test -p urmqtt-config-tool --test cli` 30 passed.
+- `make repro ENV=release` (HEAD `0ac3e1f`, the merge of the branches, before this preparation's commit; version
+  `v0.5.0-143-g0ac3e1f`): the aarch64 kernel (`d0b50c91...`), the x86_64 kernel (`e2d44e31...`), the template ISO
+  (`4d66f498...`) and the raw image (`e24cdcbd...`) identical twice.
+- `make dist ENV=release VERSION=v0.6.0` (the version given by hand, since no tag exists): `build/dist/` holds exactly
+  `SHA256SUMS` (444 B), `urmqtt-template-v0.6.0-universal.iso` (80 214 016 B), `urmqtt-v0.6.0.cdx.json` (217 268 B, 225
+  components), `urmqtt-v0.6.0.elf` (4 515 600 B), `urmqtt-v0.6.0.img` (24 117 248 B) and `urmqtt-v0.6.0.iso` (the same bytes as
+  the template); `cmp` iso/template equal; `urmqtt-config verify` on the `.img`: the empty configuration ("boots, but
+  will not serve"). The `.elf` line equals the runner's only with clang 18.1.3: this Mac's is Apple clang 17 (v0.5.0's
+  was 23.1.1), so compare on Ubuntu 24.04 arm64 (RELEASE.md section 0.6). The hashes in `SHA256SUMS` are therefore this
+  machine's, not the release's.
+- Smoke on aarch64 under HVF (the dev kernel), each group by itself: `ab` 10/0, `metrics` 2/0, `ipv6` 3/0, `unlock` 8/0,
+  `logtls` 2/0, `iommu` 6/0, `edition` 6/0, `websocket` 2/0, and `misc` with the scenarios `mqtt5`, `accounts`,
+  `conn_limit`, `mqtt_qos2` and `mqtt_persist` 11/0 (passed/failed). The `edition` group first failed on a lockfile slip of
+  this preparation (the version bump had missed `urmqtt-arch-x86_64`, whose name has an underscore, in the three lockfiles,
+  so `--locked` refused `examples/edition`); fixed, `cargo metadata --offline --locked` accepts all three now and
+  `scripts/check-lock-subset.py` is ok.
+
+**Found while preparing**
+
+- `tools/builder/test/simple.test.mjs` "the build ends in a result card", reported as failing on `release-v0.6.0` by
+  three of the item notes, passes here: it needs the emulator runtime (`make builder-emulator`), which these notes did not
+  have; the note in KNOWN-ISSUES section 7 says so.
+- `SMOKE_ONLY=mqtt5` is not a group name of `scripts/smoke.sh` (the default suite ran; the group is selected with
+  `SMOKE_ONLY=misc SMOKE_GROUPS=mqtt5`). The 47 scenarios of that stray run before it was stopped had no failure.
+
+**Not run**
+
+- The smoke suites on x86_64 (TCG) and the universal image (including `secureboot`: it needs virt-firmware, OVMF and AAVMF
+  with Secure Boot), and the x86_64 `accounts` group (needs KVM): not run for this candidate; CI runs the aarch64 shards on
+  the merge commit. The long groups of the aarch64 suite not listed above (storage, attack, hardening, ...) were not
+  re-run on the merge: each item ran its own before it was merged.
+- `make supply-chain`, `cargo vet regenerate imports && cargo vet prune`, `make ct`, Miri, Kani, sanitizers, fuzzing:
+  CI's jobs or the day's.
+- CI itself, the minisign signature, the attestations and the page and mirror with a published v0.6.0: the day's steps.
+- Nothing on KVM, a real VPS, physical hardware or Google Cloud for this candidate; the IOMMU, multiqueue and IPv6 only
+  under QEMU.
+
 ## Release v0.5.0 published and verified (2026-11-09)
 
 Tag `v0.5.0` on `9b5a095`; the workflow signed and attested the 7 assets. Checked: `minisign -Vm SHA256SUMS`, `shasum -c`,
