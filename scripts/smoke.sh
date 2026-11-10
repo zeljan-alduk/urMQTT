@@ -3360,7 +3360,10 @@ websocket() {
     local h
     h=$(printf '%s\n' web-secret | "$tool" hash-password --iterations 3000)
     sed -e 's/^mqtt_plain_port = 1883 .*/mqtt_plain_port = 0/' -e 's/^kernel_heap_mb = .*/kernel_heap_mb = 128/' \
-        "$ROOT/deploy/dev/config.toml" >"$dir/base.toml"
+        "$ROOT/deploy/dev/config.toml" |
+        # The scenarios hold up to 10000 idle connections from the one address QEMU's user network shows (1000 under
+        # TCG): beyond the default of limits.max_connections_per_ip (1024, ADR-280), so the base image raises it.
+        awk '{ print } /^\[limits\]/ { print "max_connections_per_ip = 20000" }' >"$dir/base.toml"
     mkws() { # mkws <name> <[websocket] lines...>
         local name=$1
         shift
