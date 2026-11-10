@@ -2,15 +2,20 @@
 //! the SYN-cookie handshake, then every fuzz chunk becomes a segment whose
 //! flags, sequence/ack offsets (relative to the live connection), window
 //! and payload come from the input, interleaved with timer runs, sends and
-//! closes. The stack must never panic and its invariants must hold.
+//! closes. The stack must never panic and its invariants must hold. Every
+//! input runs twice: over IPv4 and over IPv6 (NEXT-1, ADR-330: the
+//! pseudo-header, the IPv6 MSS, the local address picked per peer).
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
+use urmqtt_net::addr::{Addr, V6Locals};
 use urmqtt_tcp::wire::{self, ACK, Ext, Out, SYN};
 use urmqtt_tcp::{App, CloseReason, Config, ConnId, Endpoint, TcpStack};
 
-const S: [u8; 4] = [10, 0, 2, 15];
-const C: [u8; 4] = [10, 0, 2, 2];
+const S4: [u8; 4] = [10, 0, 2, 15];
+const C4: [u8; 4] = [10, 0, 2, 2];
+const S6: [u8; 16] = [0x20, 1, 0xd, 0xb8, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10];
+const C6: [u8; 16] = [0x20, 1, 0xd, 0xb8, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
 
 #[derive(Default)]
 struct Sink {
@@ -32,11 +37,9 @@ impl App for Sink {
     }
 }
 
-fn seg(sport: u16, seq: u32, ack: u32, flags: u8, window: u16, payload: &[u8]) -> Vec<u8> {
-    seg_x(sport, seq, ack, flags, window, &Ext::NONE, payload)
-}
-
+#[allow(clippy::too_many_arguments)]
 fn seg_x(
+    (c, s): (Addr, Addr),
     sport: u16,
     seq: u32,
     ack: u32,
@@ -47,8 +50,8 @@ fn seg_x(
 ) -> Vec<u8> {
     let mut b = Vec::new();
     wire::emit_ext(
-        C,
-        S,
+        c,
+        s,
         &Out {
             sport,
             dport: 8883,
@@ -66,9 +69,15 @@ fn seg_x(
 }
 
 fuzz_target!(|data: &[u8]| {
+    run(data, (Addr::v4(C4), Addr::v4(S4)));
+    run(data, (Addr::v6(C6), Addr::v6(S6)));
+});
+
+fn run(data: &[u8], pair: (Addr, Addr)) {
+    let (cli, srv) = pair;
     let mut s = TcpStack::new(
         Config {
-            local_addr: S,
+            local_addr: S4,
             ports: vec![8883],
             mss: 1460,
             rcv_wnd: 65535,
@@ -83,14 +92,19 @@ fuzz_target!(|data: &[u8]| {
         },
         0,
     );
+    s.set_local6(V6Locals {
+        link_local: None,
+        global: Some(S6),
+    });
     let mut app = Sink::default();
     let mut out: Vec<Vec<u8>> = Vec::new();
     // Handshake: SYN, then the ACK echoing the cookie.
     let client_isn = 1000u32;
     s.input(
         0,
-        C,
+        cli,
         &seg_x(
+            pair,
             5555,
             client_isn,
             0,
@@ -108,12 +122,13 @@ fuzz_target!(|data: &[u8]| {
         &mut |_, b| out.push(b.to_vec()),
     );
     let Some(synack) = out.pop() else { return };
-    let h = wire::parse(S, C, &synack).expect("our own SYN-ACK parses");
+    let h = wire::parse(srv, cli, &synack).expect("our own SYN-ACK parses");
     let server_isn = h.seq;
     s.input(
         0,
-        C,
+        cli,
         &seg_x(
+            pair,
             5555,
             client_isn + 1,
             server_isn.wrapping_add(1),
@@ -157,6 +172,7 @@ fuzz_target!(|data: &[u8]| {
                     payload = &[];
                 }
                 let b = seg_x(
+                    pair,
                     5555,
                     seq,
                     ack,
@@ -170,7 +186,7 @@ fuzz_target!(|data: &[u8]| {
                     },
                     payload,
                 );
-                s.input(now, C, &b, &mut app, &mut |_, _| {});
+                s.input(now, cli, &b, &mut app, &mut |_, _| {});
                 if seq == cseq {
                     cseq = cseq.wrapping_add(rest.len() as u32);
                 }
@@ -187,16 +203,16 @@ fuzz_target!(|data: &[u8]| {
             }
             _ => {
                 // Raw bytes as a segment (checksum mostly wrong, sometimes right).
-                s.input(now, C, chunk, &mut app, &mut |_, _| {});
+                s.input(now, cli, chunk, &mut app, &mut |_, _| {});
             }
         }
         s.poll(now, &mut app, &mut |_, b| {
-            wire::parse(S, C, b).expect("every segment we emit parses");
+            wire::parse(srv, cli, b).expect("every segment we emit parses");
         });
         s.flush(now, &mut |_, b| {
-            wire::parse(S, C, b).expect("every segment we emit parses");
+            wire::parse(srv, cli, b).expect("every segment we emit parses");
         });
         assert!(s.connections() <= 1);
         assert_eq!(s.connections(), app.conns.len());
     }
-});
+}

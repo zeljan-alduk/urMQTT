@@ -704,7 +704,17 @@ impl Host6 {
     }
 
     fn on_prefix(&mut self, now: u64, p: &ipv6::PrefixInfo) -> Option<Event6> {
-        if !p.autonomous || is_link_local(&p.prefix) || p.preferred_s > p.valid_s {
+        // An address must come out unicast: no link-local, multicast or
+        // all-zero /64 (which holds `::`, the loopback and IPv4-mapped
+        // addresses; found by the ipv6_nd fuzzer: a multicast "prefix" made
+        // a multicast address of our own).
+        let zero64 = p.prefix.get(..8) == Some(&[0u8; 8][..]);
+        if !p.autonomous
+            || is_link_local(&p.prefix)
+            || p.prefix[0] == 0xff
+            || zero64
+            || p.preferred_s > p.valid_s
+        {
             return None;
         }
         if p.len != 64 {
@@ -1279,5 +1289,20 @@ mod tests {
             &mut out,
         );
         assert!(out.is_empty());
+    }
+
+    /// An RA whose prefix is multicast or all-zero makes no address (found by
+    /// the ipv6_nd fuzzer).
+    #[test]
+    fn no_address_from_a_multicast_or_zero_prefix() {
+        for bad in [
+            [0xff, 3, 0x8f, 0x77, 0x20, 1, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0; 16],
+            [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ] {
+            let (mut h, mut out) = slaac_up(0);
+            feed(&mut h, 1000, &ra(bad, 100, 50, 1800, None), &mut out);
+            assert_eq!(h.global_slot(), None, "{bad:02x?}");
+        }
     }
 }

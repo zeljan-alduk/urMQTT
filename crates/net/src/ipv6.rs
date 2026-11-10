@@ -429,7 +429,9 @@ pub fn parse_icmp6<'a>(ip: &Ipv6<'a>) -> Result<Icmp6<'a>, Icmp6Error> {
     if nd && (ip.hop_limit != 255 || code != 0 || ip.ext != 0) {
         return Err(Icmp6Error::BadNd);
     }
-    if ip.src == UNSPECIFIED && t != ICMP6_NS && t != ICMP6_RS {
+    // From `::`: DAD probes, solicitations before an address, and MLD
+    // reports sent during DAD (RFC 3590); nothing else.
+    if ip.src == UNSPECIFIED && !matches!(t, ICMP6_NS | ICMP6_RS | ICMP6_MLDV2_REPORT) {
         return Err(Icmp6Error::BadNd);
     }
     match t {
