@@ -2574,7 +2574,6 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
             "limits.max_subscriptions_per_session",
             raw.max_subscriptions_per_session,
         ),
-        ("limits.max_inflight_qos1", raw.max_inflight_qos1),
         (
             "limits.handshakes_per_core_per_sec",
             raw.handshakes_per_core_per_sec,
@@ -2639,6 +2638,8 @@ fn validate_limits(raw: &RawLimits, errors: &mut Vec<ConfigError>) -> Limits {
         ),
         // ADR-280.
         ("limits.max_connections_per_ip", raw.max_connections_per_ip),
+        // ADR-377: the window fits the 65 535 packet ids.
+        ("limits.max_inflight_qos1", raw.max_inflight_qos1),
         ("limits.max_runtime_accounts", raw.max_runtime_accounts),
     ] {
         if let Some(urmqtt_cfg::fields::Kind::UInt { min, max, .. }) = default_of(key)

@@ -290,6 +290,20 @@ fn zero_limits_rejected() {
     );
 }
 
+/// BROKER-2 (v0.6.0 security review, ADR-377): an in-flight window beyond
+/// the 65 535 packet ids made the broker spin in `alloc_pid` once that many
+/// QoS 1 deliveries were out; the schema refuses it.
+#[test]
+fn inflight_window_fits_the_packet_ids() {
+    assert_rejected(
+        "dev",
+        &dev_with("max_inflight_qos1", "max_inflight_qos1 = 65536"),
+        "limits.max_inflight_qos1",
+    );
+    let text = dev_with("max_inflight_qos1", "max_inflight_qos1 = 65535");
+    assert_eq!(messages(parse("dev", &text)), Vec::<String>::new());
+}
+
 #[test]
 fn topic_filters() {
     let l = limits();

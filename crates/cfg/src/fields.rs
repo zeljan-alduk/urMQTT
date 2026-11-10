@@ -584,7 +584,8 @@ pub static FIELDS: &[Field] = &[
     f(
         t::LIM_INFLIGHT,
         "limits.max_inflight_qos1",
-        uint(4, 1, U32, 16),
+        // ADR-377: at most the 65 535 packet ids.
+        uint(4, 1, 65_535, 16),
         "QoS 1 messages in flight per session.",
     ),
     f(

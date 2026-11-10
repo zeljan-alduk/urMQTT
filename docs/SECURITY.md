@@ -861,10 +861,10 @@ Every resource is bounded. What happens at the limit is part of the design:
 | Subscriptions per session | `limits.max_subscriptions_per_session` | SUBACK failure |
 | Shared-subscription groups per data core, members per group | `limits.max_shared_groups`, `limits.max_shared_group_members` (1024 each; ADR-275) | SUBACK 0x97 (3.1.1: 0x80), counted (`shared/joins/refused`) |
 | MQTT 5.0 topic-alias table per connection | `mqtt5.topic_alias_maximum` × (16 + `limits.max_topic_len`) bytes, 2 720 B by default | alias refused (DISCONNECT 0x94); counted in the heap statistics (`memory/topic_aliases`) and seen by the free-heap admission |
-| QoS 1 and 2 in flight, offline queue | `limits.max_inflight_qos1`, `limits.max_queued_per_offline_session` | queued; beyond the queue, new messages are dropped and counted |
+| QoS 1 and 2 in flight, offline queue | `limits.max_inflight_qos1` (at most 65 535, the packet ids; ADR-377), `limits.max_queued_per_offline_session` | queued; beyond the queue, new messages are dropped and counted |
 | QoS 2 ids awaiting PUBREL | `max(limits.max_inflight_qos1, 64)` per session (ADR-271) | one more closes the connection, counted (`messages/qos2/inbound_full`) |
 | Publish rate per device | `limits.publish_rate_per_device` | dropped and counted |
-| Output buffered per connection | 32 KiB | QoS 0 dropped, QoS 1 queued |
+| Output buffered per connection | 32 KiB for deliveries; the broker's own answers (CONNACK, PINGRESP, acknowledgements, SUBACK) up to 32 KiB + `limits.max_packet_size` + 4 KiB (ADR-375) | QoS 0 dropped, QoS 1 queued; a client that sends without reading its answers has its input held and its TCP window closed until it reads; one that ignores the closed window is disconnected once 2 MiB are held (DISCONNECT 0x97) |
 | Receive window | broker backpressure | TCP window closes |
 | Cross-core fan-out | 16 384 messages per core pair | QoS 0 dropped, QoS 1 kept |
 | Telemetry backlog | 65 536 records per core | dropped and counted |

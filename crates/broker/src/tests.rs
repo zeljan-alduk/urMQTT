@@ -2674,3 +2674,90 @@ fn the_class_lookup_does_not_touch_certificate_identities() {
     );
     assert_eq!(b.stats().dropped_acl, before);
 }
+
+/// BROKER-5 (v0.6.0 security review, ADR-376): a device's own-scope
+/// filters live in `Broker::scoped`, shared by every device. They used to
+/// stay there for good: SUBSCRIBE + UNSUBSCRIBE of fresh filters, one at a
+/// time, grew the heap by about 4.5 KB a pair until the allocation failed.
+/// Now each scoped node counts the subscriptions that use it and is pruned
+/// at zero, by UNSUBSCRIBE and by the session's end alike, and a filter
+/// two devices share stays while one of them still holds it.
+#[test]
+fn scoped_filters_leave_no_nodes_behind() {
+    let mut b = Broker::new(cfg());
+    let (mut svc, _) = Client::connect(&mut b, "backend", true, None, 0);
+    let (mut d1, _) = Client::connect(&mut b, "d1", true, None, 0);
+    let (mut d2, _) = Client::connect(&mut b, "d2", true, None, 0);
+    let base = b.scoped.node_count();
+    for i in 0..300u16 {
+        let f = format!("devices/d1/cmd/{i}/xxxxxxxxxxxxxxxx/yyyyyyyyyyyyyyyy/#");
+        assert_eq!(
+            d1.subscribe(&mut b, i + 1, &[(&f, QoS::AtMostOnce)], 0),
+            vec![Got::SubAck(i + 1, vec![0])]
+        );
+        d1.send(
+            &mut b,
+            &Packet::Unsubscribe(Unsubscribe {
+                packet_id: i + 1,
+                topics: UnsubscribeTopics::List(&[&f]),
+            }),
+            0,
+        );
+        assert_eq!(d1.recv(&mut b), vec![Got::UnsubAck(i + 1)]);
+    }
+    assert_eq!(b.scoped.node_count(), base, "UNSUBSCRIBE frees the nodes");
+    // One filter, two devices: d1 leaving keeps d2's.
+    d1.subscribe(&mut b, 1, &[("devices/d1/cmd/x", QoS::AtMostOnce)], 0);
+    d2.subscribe(&mut b, 1, &[("devices/d2/cmd/x", QoS::AtMostOnce)], 0);
+    // The same filter again only updates the options: still one hold.
+    d2.subscribe(&mut b, 2, &[("devices/d2/cmd/x", QoS::AtLeastOnce)], 0);
+    d1.send(
+        &mut b,
+        &Packet::Unsubscribe(Unsubscribe {
+            packet_id: 2,
+            topics: UnsubscribeTopics::List(&["devices/d1/cmd/x"]),
+        }),
+        0,
+    );
+    d1.recv(&mut b);
+    assert!(b.scoped.node_count() > base);
+    svc.publish(
+        &mut b,
+        "devices/d2/cmd/x",
+        b"still",
+        QoS::AtMostOnce,
+        false,
+        0,
+    );
+    assert_eq!(
+        d2.recv(&mut b),
+        vec![publish("devices/d2/cmd/x", b"still", 0, None, false)]
+    );
+    // The session's end frees the last hold.
+    d2.disconnect(&mut b, 0);
+    assert_eq!(b.scoped.node_count(), base, "the session's end frees them");
+    // A persistent session keeps its filter while offline, and its end
+    // (a clean session taking over) frees it.
+    let (mut d3, _) = Client::connect(&mut b, "d3", false, None, 0);
+    d3.subscribe(&mut b, 1, &[("devices/d3/cmd/y/#", QoS::AtMostOnce)], 0);
+    d3.kill(&mut b, 0);
+    assert!(b.scoped.node_count() > base);
+    let (d3, _) = Client::connect(&mut b, "d3", true, None, 0);
+    assert_eq!(b.scoped.node_count(), base);
+    d3.disconnect(&mut b, 0);
+}
+
+/// BROKER-2 (v0.6.0 security review, ADR-377): the in-flight window never
+/// exceeds the 65 535 packet ids, whatever the configuration says, so
+/// `alloc_pid` always finds a free one (it used to spin forever once
+/// 65 535 flights were out with `max_inflight` above that).
+#[test]
+fn the_inflight_window_fits_the_packet_id_space() {
+    let b = Broker::new(Config {
+        max_inflight: 70_000,
+        ..cfg()
+    });
+    assert_eq!(b.window(None), MAX_INFLIGHT);
+    assert_eq!(MAX_INFLIGHT, usize::from(u16::MAX));
+    assert!(b.qos2_id_limit() <= MAX_INFLIGHT);
+}
