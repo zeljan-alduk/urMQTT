@@ -1730,7 +1730,7 @@ dependencies = [
  "ecdsa",
  "p256",
  "rand_chacha",
- "rand_core 0.6.4",
+ "rand_core 0.10.1",
  "zeroize",
 ]
 
@@ -1801,7 +1801,7 @@ dependencies = [
  "p256",
  "primeorder",
  "rand_chacha",
- "rand_core 0.6.4",
+ "rand_core 0.10.1",
  "rfc6979",
  "rustls",
  "rustls-pki-types",
@@ -1842,7 +1842,7 @@ version = "0.6.0"
 dependencies = [
  "cpufeatures 0.3.1",
  "rand_chacha",
- "rand_core 0.6.4",
+ "rand_core 0.10.1",
  "x25519-dalek",
 ]
 
