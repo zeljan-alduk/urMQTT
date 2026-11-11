@@ -32,7 +32,11 @@ export function cli(args, opts = {}) {
 export function realTemplate() {
   const dir = join(ROOT, 'build');
   if (!existsSync(dir)) return null;
-  const f = readdirSync(dir).filter(n => /^urmqtt-template-.*-universal\.iso$/.test(n)).sort().pop();
+  // Only a template of this version: the tests expect the kernel to read the newest configuration format, which
+  // an older release's template (a leftover of checking a release) does not.
+  const ver = /^version\s*=\s*"([^"]+)"/m.exec(readFileSync(join(ROOT, 'Cargo.toml'), 'utf8'));
+  const prefix = ver ? `urmqtt-template-v${ver[1]}` : 'urmqtt-template-v';
+  const f = readdirSync(dir).filter(n => n.startsWith(prefix) && /-universal\.iso$/.test(n)).sort().pop();
   return f ? join(dir, f) : null;
 }
 
