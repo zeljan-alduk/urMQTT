@@ -18,6 +18,6 @@ workspace = true
 cpufeatures = { version = "0.3", default-features = false }
 
 [dev-dependencies]
-x25519-dalek = { version = "2", default-features = false }
+x25519-dalek = { version = "3", default-features = false }
 rand_chacha = { version = "0.3", default-features = false }
 rand_core = { version = "0.6", default-features = false }
