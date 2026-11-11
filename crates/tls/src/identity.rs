@@ -97,20 +97,35 @@ fn serial_full(cert_der: &[u8]) -> Option<Vec<u8>> {
     Some(c.tbs_certificate().serial_number().as_bytes().to_vec())
 }
 
+/// The subject's one CN, as UTF8String or PrintableString (ADR-360). A
+/// subject with more than one CN, or with a CN of any other string type
+/// (T61String, BMPString, IA5String, ...), has no identity: another reader
+/// of the same certificate (an enrollment service, `openssl -nameopt`,
+/// `scripts/pki.sh`) may take a different CN than we would, and the
+/// certificate would then be issued for one name and accepted as another.
 fn common_name(c: &Certificate) -> Option<String> {
+    let mut found = None;
     for atv in c.tbs_certificate().subject().iter() {
-        if atv.oid == OID_CN {
-            if let Ok(s) = der::asn1::Utf8StringRef::try_from(&atv.value) {
-                return Some(s.as_str().into());
-            }
-            if let Ok(s) = der::asn1::PrintableStringRef::try_from(&atv.value) {
-                return Some(s.as_str().into());
-            }
+        if atv.oid != OID_CN {
+            continue;
         }
+        if found.is_some() {
+            return None; // a second CN
+        }
+        let s = if let Ok(s) = der::asn1::Utf8StringRef::try_from(&atv.value) {
+            String::from(s.as_str())
+        } else if let Ok(s) = der::asn1::PrintableStringRef::try_from(&atv.value) {
+            String::from(s.as_str())
+        } else {
+            return None; // a CN of another string type
+        };
+        found = Some(s);
     }
-    None
+    found
 }
 
+/// The id of the SAN's one `urn:urmqtt:` identity URI. More than one such
+/// URI is no identity (ADR-360), for the reason given at [`common_name`].
 fn san_uri(c: &Certificate) -> Option<String> {
     let ext = c
         .tbs_certificate()
@@ -119,7 +134,7 @@ fn san_uri(c: &Certificate) -> Option<String> {
         .iter()
         .find(|e| e.extn_id == OID_SAN)?;
     let san = SubjectAltName::from_der(ext.extn_value.as_bytes()).ok()?;
-    san.0.iter().find_map(|g| match g {
+    let mut ids = san.0.iter().filter_map(|g| match g {
         GeneralName::UniformResourceIdentifier(u) => {
             let s = u.as_str();
             URI_PREFIXES
@@ -128,7 +143,9 @@ fn san_uri(c: &Certificate) -> Option<String> {
                 .map(String::from)
         }
         _ => None,
-    })
+    });
+    let id = ids.next()?;
+    ids.next().is_none().then_some(id)
 }
 
 /// The identity of `cert_der` according to `field`, if present.
@@ -166,6 +183,79 @@ mod tests {
             }
         }
         out
+    }
+
+    fn fixture(pem: &str) -> alloc::vec::Vec<u8> {
+        use pki_types::CertificateDer;
+        use pki_types::pem::PemObject;
+        CertificateDer::from_pem_slice(pem.as_bytes())
+            .unwrap()
+            .as_ref()
+            .to_vec()
+    }
+
+    /// Security review v0.6.0, AUTHZ-1 (ADR-360): a CSR with CN#1 T61String
+    /// "sensor_042" and CN#2 PrintableString "operator" was signed by
+    /// `pki.sh sign-csr` as device "sensor_042" (it read the first CN of any
+    /// type and copied the subject), and the broker took the first
+    /// UTF8/Printable CN: "operator". Such a subject now has no identity.
+    #[test]
+    fn a_subject_with_two_cns_or_a_cn_of_another_string_type_has_no_identity() {
+        // The certificates are the committed fuzz seeds (DER; *.pem files are
+        // never committed, ADR-004).
+        // Subject CN=sensor_042 (T61String), CN=operator (PrintableString),
+        // SAN URI urn:urmqtt:device:sensor_042.
+        let two = include_bytes!("../../../fuzz/seeds/x509_identity/two-cn.der").to_vec();
+        assert_eq!(identity(&two, IdentityField::Cn), None);
+        // The SAN URI is one and is what the CA wrote.
+        assert_eq!(
+            identity(&two, IdentityField::SanUri).as_deref(),
+            Some("sensor_042")
+        );
+        // One CN, but a T61String: not taken (it never was).
+        let t61 = include_bytes!("../../../fuzz/seeds/x509_identity/t61-cn.der").to_vec();
+        assert_eq!(identity(&t61, IdentityField::Cn), None);
+        // Two identity URIs (device:device-1, service:operator): none.
+        let uris = include_bytes!("../../../fuzz/seeds/x509_identity/two-uri.der").to_vec();
+        assert_eq!(identity(&uris, IdentityField::SanUri), None);
+        assert_eq!(
+            identity(&uris, IdentityField::Cn).as_deref(),
+            Some("device-1")
+        );
+        // The ordinary shape: O=Test, CN=device-1 (PrintableString), one URI.
+        let one = include_bytes!("../../../fuzz/seeds/x509_identity/one-cn.der").to_vec();
+        assert_eq!(
+            identity(&one, IdentityField::Cn).as_deref(),
+            Some("device-1")
+        );
+        assert_eq!(
+            identity(&one, IdentityField::SanUri).as_deref(),
+            Some("device-1")
+        );
+    }
+
+    /// Every client certificate of `make certs` still has its identity, and
+    /// the CN and the SAN URI agree where both are present.
+    #[test]
+    fn the_dev_certificates_keep_their_identities() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../deploy/dev");
+        for sub in ["devices", "services"] {
+            let Ok(rd) = std::fs::read_dir(dir.join(sub)) else {
+                continue; // no dev certificates: make certs
+            };
+            for e in rd.flatten() {
+                if e.path().extension().is_none_or(|x| x != "pem") {
+                    continue;
+                }
+                let pem = std::fs::read_to_string(e.path()).unwrap();
+                let c = fixture(&pem);
+                let cn = identity(&c, IdentityField::Cn);
+                assert!(cn.is_some(), "{}", e.path().display());
+                if let Some(uri) = identity(&c, IdentityField::SanUri) {
+                    assert_eq!(cn.as_deref(), Some(uri.as_str()), "{}", e.path().display());
+                }
+            }
+        }
     }
 
     #[test]

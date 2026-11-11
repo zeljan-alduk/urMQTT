@@ -263,6 +263,19 @@ impl<'a> Authenticator<'a> {
             None => (&self.decoy, None),
         };
         let matched = hash.verify(password.unwrap_or(&[]));
+        // The same work on every path (ADR-364): an account hashed with
+        // fewer iterations than the decoy (accounts of mixed counts are
+        // allowed) would answer sooner than an unknown user, and the time of
+        // a refusal would say whether the name exists. The difference is
+        // spent on a throwaway derivation.
+        let rest = self.decoy.iterations().saturating_sub(hash.iterations());
+        if rest > 0 {
+            core::hint::black_box(urmqtt_cfg::passwd::pbkdf2_hmac_sha256(
+                core::hint::black_box(b"decoy"),
+                self.decoy.salt(),
+                rest,
+            ));
+        }
         match (ok_identity, password, matched) {
             (Some(id), Some(_), true) => Verdict::Accept(id),
             (Some(_), Some(_), false) => Verdict::Reject(Rejection::WrongPassword),
@@ -719,6 +732,63 @@ mod tests {
         assert_eq!(
             a.authenticate(SRC, Some("a"), Some(&huge)),
             Verdict::Reject(Rejection::WrongPassword)
+        );
+    }
+
+    /// Security review v0.6.0, AUTHZ-3 (ADR-364): with accounts of different
+    /// iteration counts, a wrong password for the cheaper account was
+    /// answered 10 to 100 times sooner than an unknown user (checked against
+    /// the decoy at the dearest count): the refusal's time named the
+    /// accounts. Every path now costs the dearest count.
+    #[test]
+    fn a_cheaper_account_takes_as_long_as_an_unknown_user() {
+        use std::time::{Duration, Instant};
+        let cheap = std::boxed::Box::leak(
+            passwd::encode(b"x", b"0123456789abcdef", 1_000)
+                .unwrap()
+                .into_boxed_str(),
+        );
+        let dear = std::boxed::Box::leak(
+            passwd::encode(b"y", b"fedcba9876543210", 40_000)
+                .unwrap()
+                .into_boxed_str(),
+        );
+        let users: &'static [PlainUser] = std::boxed::Box::leak(std::boxed::Box::new([
+            PlainUser {
+                id: "sensor-1",
+                hash: cheap,
+            },
+            PlainUser {
+                id: "gateway",
+                hash: dear,
+            },
+        ]));
+        let a = Authenticator::password_only(users);
+        let time = |u: &str| {
+            let t0 = Instant::now();
+            let v = a.authenticate(SRC, Some(u), Some(b"wrong"));
+            (t0.elapsed(), v)
+        };
+        let (mut known, mut unknown) = (Duration::MAX, Duration::MAX);
+        for _ in 0..3 {
+            let (k, vk) = time("sensor-1");
+            let (u, vu) = time("nobody");
+            assert_eq!(vk, Verdict::Reject(Rejection::WrongPassword));
+            assert_eq!(vu, Verdict::Reject(Rejection::UnknownUser));
+            assert_eq!(vk.connack_code(), vu.connack_code());
+            known = known.min(k);
+            unknown = unknown.min(u);
+        }
+        // Before: about 40 times apart. Now the same work; the bound leaves
+        // room for a busy machine.
+        assert!(
+            known * 3 > unknown,
+            "a cheaper account answers sooner: {known:?} vs {unknown:?}"
+        );
+        // And a good password still logs in.
+        assert_eq!(
+            a.authenticate(SRC, Some("sensor-1"), Some(b"x")),
+            Verdict::Accept("sensor-1")
         );
     }
 }

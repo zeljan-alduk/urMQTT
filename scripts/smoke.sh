@@ -1054,8 +1054,14 @@ fin_wait2() {
         # At once: a "mem: 0" line after the devices close would prove nothing.
         kill_vm
         grep -v '^loadgen: bench-' "$log.client" >>"$log" 2>/dev/null || true
-        check "fin-wait2: half-open peers end after FIN-WAIT-2, no FIN loop [$accel]" "$log" "$status" \
-            "loadgen: hold: 50 of 50 connections established" "mem: 0 connection\(s\)" \
+        # Since ADR-355 the broker's own close has a deadline (5 s): these
+        # connections are reset there, before FIN-WAIT-2 (60 s) could end them
+        # and before the 10 s memory report sees them, so the proof that they
+        # all ended is the deadline's log line (it names every power of two,
+        # 16 per core at least for 50 devices on two cores), not "mem: 0".
+        check "fin-wait2: half-open peers end at the close deadline, no FIN loop [$accel]" "$log" "$status" \
+            "loadgen: hold: 50 of 50 connections established" \
+            "tcp: 16 close\(s\) not finished within 5000 ms reset on core" \
             "loadgen: hold: 50 connections kept for 90 s" "$NO_FAULT"
     done
 }
@@ -1065,30 +1071,38 @@ fin_wait2() {
 # injects 20 000 crafted segments. The broker must absorb them: SYN cookies
 # issued without per-connection state, the RFC 5961 RST/challenge rate cap
 # holding, RSTs for unknown connections dropped, and the heap never growing.
+# zero-window-close (NETDOS-1, ADR-355): 2 000 handshakes completed with a
+# zero-window ACK carrying no ClientHello, then silence. The broker queues an
+# alert and a FIN it can never send; each connection must still be reset at
+# its close deadline (one RST per handshake back to the tool, 0 connections
+# left), where before every one was held until reboot.
 attack_raw() {
     local attack="$ROOT/target/release/urmqtt-attack"
-    if [[ ! -x "$attack" ]]; then
+    if [[ ! -x "$attack" ]] || [[ "$ROOT/tools/attack/src/raw.rs" -nt "$attack" ]]; then
         (cd "$ROOT" && cargo build --release -q -p urmqtt-attack) || {
             echo "  ✗ urmqtt-attack build failed"; FAILED=$((FAILED + 1)); return 0; }
     fi
     local iso="$OUT/attack-raw.raw"
     mkimg "$iso" "serve log=info"
-    # mode|extra checks (beyond the common ones) ...
+    # mode|extra checks (beyond the common ones)|tool arguments
+    local flood="--count 20000 --pps 8000"
     local specs=(
-        "syn-flood|cookies [1-9][0-9]* sent/[0-9]+ ok/0 bad|attack: syn-flood sent 20000"
-        "ack-flood|RST [0-9]+ sent \([1-9][0-9]* rate-limited\)|attack: ack-flood sent 20000"
-        "rst-flood|RST 0 sent \(0 rate-limited\)|attack: rst-flood sent 20000"
+        "syn-flood|cookies [1-9][0-9]* sent/[0-9]+ ok/0 bad|attack: syn-flood sent 20000|$flood"
+        "ack-flood|RST [0-9]+ sent \([1-9][0-9]* rate-limited\)|attack: ack-flood sent 20000|$flood"
+        "rst-flood|RST 0 sent \(0 rate-limited\)|attack: rst-flood sent 20000|$flood"
+        "zero-window-close|close\(s\) not finished within 5000 ms reset|attack: zero-window-close sent 2000 SYN\(s\), [1-9][0-9]* handshake\(s\) .* \(every one freed\)|--count 2000 --pps 1000 --duration 40"
     )
     local n=0
     for accel in $ACCELS; do
         for spec in "${specs[@]}"; do
-            IFS='|' read -r mode p_counter p_client <<<"$spec"
+            IFS='|' read -r mode p_counter p_client args <<<"$spec"
             local log="$OUT/attack-$mode-$accel.log" data="$OUT/attack-$mode-$accel.img" status=0
             local lp=$((45000 + n * 2)) rp=$((45001 + n * 2)); n=$((n + 1))
             fresh_disk "$iso" "$data"
             # Start the tool first: it binds the socket and serves DHCP, then
             # blocks until the guest's boot-time lease, floods, and exits.
-            ("$attack" "$mode" --dgram "$lp:$rp" --port 8883 --count 20000 --pps 8000) \
+            # shellcheck disable=SC2086 # $args is a word list
+            ("$attack" "$mode" --dgram "$lp:$rp" --port 8883 $args) \
                 >"$log.client" 2>&1 &
             local apid=$!
             start_vm "$log" --disk "$data" --accel "$accel" --dgram "$lp:$rp"
@@ -3289,7 +3303,7 @@ plaintext() {
                 "client: pubsub-wildcard ok" "client: retained ok" "client: lwt-forced-disconnect ok" "client: qos1-after-reconnect ok"
                 "client: tls-revoked-rejected ok") ;;
             lockout) extra=("plaintext: 10\.0\.2\.2 is locked out for 10 s after 3 failed login\(s\)" "plaintext: 1 SYN\(s\) from locked-out addresses dropped without an answer"
-                "client: locked-out-address-gets-no-answer ok" "client: login-works-again-after-the-lockout ok" "client: tls-is-not-locked-out ok") ;;
+                "client: a-login-inside-the-window-works ok" "client: locked-out-address-gets-no-answer ok" "client: login-works-again-after-the-lockout ok" "client: tls-is-not-locked-out ok") ;;
             refused) extra=("plaintext: 1 SYN\(s\) from addresses outside plaintext\.allow_from dropped without an answer"
                 "client: refused-source-gets-no-answer ok" "client: tls-works-beside-a-refused-plaintext-source ok" "NOT:login refused") ;;
             anonymous) extra=("mqtt: plaintext.auth = \"anonymous\"" "client: anonymous-default-clients ok" "client: anonymous-acl ok") ;;

@@ -7,34 +7,37 @@ on:
 permissions:
   contents: read
 
+# Three jobs, so that the release key is never in a job that runs build code (security review of
+# v0.6.0, SUPPLY-1, ADR-380; docs/release-key-rotation.md, "Where the key is used"):
+# - build: builds and checks the release assets. It runs third-party code (build.rs files, proc
+#   macros, apt packages), so it holds no secret and no write permission, and it refuses a tag
+#   whose commit is not on main.
+# - sign: in the protected environment `release` (required reviewer, deployment from `v*` tags
+#   only; the secret MINISIGN_SECRET_KEY is an environment secret there). It checks out nothing
+#   but minisign.pub, takes SHA256SUMS from the build job, signs it and builds nothing; the key
+#   goes to minisign through a pipe, never into a file.
+# - publish: attestations and the GitHub release (id-token, attestations and contents write),
+#   from the build job's files and the signature; it builds and checks out nothing.
+# scripts/check-release-workflow.py checks this shape (CI, "Release keys").
+
 jobs:
-  release:
-    name: Build and publish ${{ github.ref_name }}
+  build:
+    name: Build ${{ github.ref_name }}
     runs-on: ubuntu-24.04-arm
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
-    env:
-      # The release key (ROADMAP NOW-2, docs/release-key-rotation.md): the secret half of
-      # minisign.pub, passwordless (minisign -G -W), in the repository secret
-      # MINISIGN_SECRET_KEY. A release is never published unsigned: the mirror and the
-      # builder page refuse it anyway.
-      HAS_MINISIGN: ${{ secrets.MINISIGN_SECRET_KEY != '' }}
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
-      # First, before anything is built: minisign.pub must be the real release key, not the
+      # First, before anything is built: the tag names a commit on main (a tag pushed on an
+      # unreviewed branch is not built), minisign.pub must be the real release key, not the
       # placeholder and not the former test key, and keys/release-keys.json must be sound.
+      - name: The tag is a release tag on main
+        run: scripts/check-release-tag.sh --commit "$GITHUB_SHA" "$GITHUB_REF_NAME"
       - name: The release key is set
         run: scripts/check-release-key.sh
-      - name: The signing secret is set
-        if: env.HAS_MINISIGN != 'true'
-        run: |
-          echo "::error::the repository secret MINISIGN_SECRET_KEY is not set: a release is never published unsigned (docs/release-key-rotation.md)"
-          exit 1
       - uses: ./.github/actions/setup
         with:
           cache-key: release
@@ -47,7 +50,7 @@ jobs:
       # their own deploy/prod/ (docs/DEPLOY.md); the dev build with throwaway certificates
       # is not published any more.
       - name: Install ISO tools
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends xorriso mtools minisign
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends xorriso mtools
       - run: make dist ENV=release
       - name: The release assets, and nothing of a dev build
         run: |
@@ -62,16 +65,80 @@ jobs:
           done
           # No private key in any asset (the release kernels and the empty configuration hold none).
           python3 -I scripts/check-no-pem-keys.py build/dist/*
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: build/dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  sign:
+    name: Sign ${{ github.ref_name }}
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    # The environment's protection rules (a required reviewer, deployments from `v*` tags only)
+    # are set in the repository settings (docs/release-key-rotation.md); the release key is its
+    # environment secret, not a repository secret.
+    environment: release
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      # minisign.pub only: what every user verifies with. Nothing of the tagged tree runs here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: minisign.pub
+          sparse-checkout-cone-mode: false
+      - name: Install minisign
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends minisign
+      - name: SHA256SUMS of the build job
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n dist -D dist
+          cp dist/SHA256SUMS SHA256SUMS
+          cat SHA256SUMS
+      # The release key (ROADMAP NOW-2, docs/release-key-rotation.md): the secret half of
+      # minisign.pub, passwordless (minisign -G -W). It reaches minisign through a pipe
+      # (process substitution), never a file. A release is never published unsigned: the
+      # mirror and the builder page refuse it anyway.
       - name: Sign SHA256SUMS with minisign
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
         run: |
-          key="$RUNNER_TEMP/minisign.key"
-          (umask 077 && printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key")
-          minisign -S -s "$key" -m build/dist/SHA256SUMS -t "urMQTT $GITHUB_REF_NAME release $GITHUB_SHA" </dev/null
-          rm -f "$key"
+          if [[ -z $MINISIGN_SECRET_KEY ]]; then
+            echo "::error::the secret MINISIGN_SECRET_KEY of the environment release is not set: a release is never published unsigned (docs/release-key-rotation.md)"
+            exit 1
+          fi
+          minisign -S -s <(printf '%s\n' "$MINISIGN_SECRET_KEY") -m SHA256SUMS -t "urMQTT $GITHUB_REF_NAME release $GITHUB_SHA" </dev/null
           # The secret must belong to the committed minisign.pub: what every user verifies with.
-          minisign -Vm build/dist/SHA256SUMS -p minisign.pub
+          minisign -Vm SHA256SUMS -p minisign.pub
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signature
+          path: SHA256SUMS.minisig
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish ${{ github.ref_name }}
+    needs: [build, sign]
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      actions: read
+    steps:
+      - name: The build job's files and the signature
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build/dist
+          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n dist -D build/dist
+          gh run download "$GITHUB_RUN_ID" -R "$GITHUB_REPOSITORY" -n signature -D build/dist
+          ls -l build/dist
       # The SBOM (CycloneDX, scripts/sbom.py) is built by make dist and listed
       # in SHA256SUMS; this binds it to the images as an SBOM attestation next
       # to the provenance below (H9, ADR-190).

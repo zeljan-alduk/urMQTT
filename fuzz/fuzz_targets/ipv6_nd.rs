@@ -83,11 +83,16 @@ fuzz_target!(|data: &[u8]| {
             let mut t = String::new();
             urmqtt_cfg::net::write_ipv6(&mut t, &a).unwrap();
             assert_eq!(urmqtt_cfg::net::parse_ipv6(&t), Some(a), "{s:?} -> {t}");
-            assert_eq!(
-                format!("{}", Addr::v6(a)),
-                t,
-                "the kernel writes it the same way"
-            );
+            // `Addr` writes an IPv4-mapped address (::ffff:a.b.c.d) as the
+            // dotted quad it stands for, by design; every other address is
+            // written the way the configuration writes it.
+            if !(a[..10].iter().all(|b| *b == 0) && a[10] == 0xff && a[11] == 0xff) {
+                assert_eq!(
+                    format!("{}", Addr::v6(a)),
+                    t,
+                    "the kernel writes it the same way"
+                );
+            }
         }
         if let Ok(c) = urmqtt_cfg::net::Cidr6::parse(s) {
             assert_eq!(urmqtt_cfg::net::Cidr6::parse(&c.to_string()), Ok(c));

@@ -185,6 +185,17 @@ struct Mmio {
     next: u64,
     hhdm: u64,
     early: Option<(u64, BumpFrames)>,
+    /// The memory map: device mappings never cover RAM (ADR-345).
+    ram: &'static [&'static Entry],
+}
+
+/// Whether `[pa, pa + len)` overlaps a RAM-like entry of `map` (or wraps).
+fn overlaps_ram(map: &[&Entry], pa: u64, len: u64) -> bool {
+    let Some(end) = pa.checked_add(len) else {
+        return true;
+    };
+    map.iter()
+        .any(|e| is_ram(e.type_) && pa < e.base.saturating_add(e.length) && e.base < end)
 }
 
 static MMIO: SpinLock<Option<Mmio>> = SpinLock::new(None);
@@ -215,6 +226,7 @@ pub fn init_early_mmio(mem: &BootMemory) -> bool {
         next: mmio_base(),
         hhdm: mem.hhdm,
         early: Some((root, BumpFrames::new(base, len))),
+        ram: mem.map,
     });
     true
 }
@@ -222,12 +234,23 @@ pub fn init_early_mmio(mem: &BootMemory) -> bool {
 /// Maps `len` bytes of device memory at `pa`; returns the virtual address.
 /// Before the kernel tables are active this edits the bootloader's tables;
 /// afterwards it goes through `vm` (and fails once the tables are locked).
+/// A range that overlaps RAM in the memory map is refused: device
+/// addresses (BARs, MSI-X tables) come from the device, and a device
+/// memory alias of the kernel's RAM would let it aim the kernel's register
+/// writes there (ADR-345).
 pub fn map_mmio(pa: u64, len: u64) -> Result<u64, MapError> {
     let mut guard = MMIO.lock();
     let m = guard.as_mut().ok_or(MapError::OutOfFrames)?;
     let page_off = pa % PAGE_SIZE;
     let base = pa - page_off;
-    let size = (page_off + len).div_ceil(PAGE_SIZE) * PAGE_SIZE;
+    let size = page_off
+        .checked_add(len)
+        .ok_or(MapError::Unaligned)?
+        .div_ceil(PAGE_SIZE)
+        * PAGE_SIZE;
+    if overlaps_ram(m.ram, base, size) {
+        return Err(MapError::AlreadyMapped);
+    }
     // Large, block-aligned regions (PCIe ECAM) get a block-aligned VA so
     // they can be mapped with 2 MiB blocks instead of thousands of pages.
     let block = paging::BLOCK_2M;
@@ -236,7 +259,8 @@ pub fn map_mmio(pa: u64, len: u64) -> Result<u64, MapError> {
     } else {
         m.next
     };
-    if va + size > mmio_base() + MMIO_SIZE - PAGE_SIZE || m.count >= MAX_MMIO_MAPPINGS {
+    if va.saturating_add(size) > mmio_base() + MMIO_SIZE - PAGE_SIZE || m.count >= MAX_MMIO_MAPPINGS
+    {
         return Err(MapError::OutOfFrames);
     }
     let hhdm = m.hhdm;

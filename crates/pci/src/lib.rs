@@ -292,6 +292,25 @@ pub fn msix<C: ConfigSpace>(cfg: &C, bdf: Bdf) -> Option<MsixInfo> {
     })
 }
 
+/// Where the MSI-X table of `info` lies: (physical address, bytes). `None`
+/// unless its BAR is an assigned memory BAR and the whole table
+/// (`table_size` entries of 16 bytes from `table_offset`) lies inside that
+/// BAR, sized by probing ([`bar_size`], so call it before the function is
+/// in use). Offset and size come from the device's capability: unchecked,
+/// a device could have the kernel map and write any 8-byte-aligned address
+/// up to 4 GiB above the BAR, RAM included (ADR-345).
+pub fn msix_table<C: ConfigSpace>(cfg: &mut C, bdf: Bdf, info: &MsixInfo) -> Option<(u64, u64)> {
+    let Some(Bar::Memory { base, .. }) = bar(cfg, bdf, info.table_bar) else {
+        return None;
+    };
+    let len = u64::from(info.table_size) * 16;
+    let end = u64::from(info.table_offset).checked_add(len)?;
+    if end > bar_size(cfg, bdf, info.table_bar)? {
+        return None;
+    }
+    Some((base.checked_add(u64::from(info.table_offset))?, len))
+}
+
 /// Sets bits in the command register.
 pub fn enable<C: ConfigSpace>(cfg: &mut C, bdf: Bdf, bits: u16) {
     let cmd = cfg.read16(bdf, COMMAND);
@@ -577,6 +596,55 @@ mod tests {
         r[0x34 / 4] = 0x40;
         r[0x40 / 4] = 0x0000_4009; // points at itself
         assert_eq!(capabilities(&sim, bdf(0, 4, 0)).count(), MAX_CAPS);
+    }
+
+    /// ADR-345: the MSI-X table must lie inside its BAR. Before the fix the
+    /// kernel mapped `BAR base + table_offset` for `table_size * 16` bytes
+    /// with no size check, so a device could aim the kernel's MSI entry
+    /// writes at RAM up to 4 GiB above its BAR.
+    #[test]
+    fn msix_table_outside_its_bar_is_refused() {
+        let b = bdf(0, 6, 0);
+        let device = |table: u32, ctrl: u32| {
+            let mut sim = Sim::default();
+            let r = sim.add(b, 0x1af4, 0x1041, 0, 0);
+            r[1] = 0x0010_0006; // capability list; memory, bus master
+            r[0x34 / 4] = 0x40;
+            r[0x40 / 4] = (ctrl << 16) | 0x11; // MSI-X, next 0
+            r[0x44 / 4] = table;
+            r[4] = 0xfebf_0000; // BAR0: 32-bit memory, 16 KiB
+            r[5] = 0xfebf_8000; // BAR1: 32-bit memory, 4 KiB
+            Masked {
+                sim,
+                masks: BTreeMap::from([(0x10, 0xffff_c000), (0x14, 0xffff_f000)]),
+            }
+        };
+        let table = |table: u32, ctrl: u32| {
+            let mut m = device(table, ctrl);
+            let info = msix(&m, b).unwrap();
+            let got = msix_table(&mut m, b, &info);
+            // Sizing restores the BARs and the command register.
+            assert_eq!(m.sim.read32(b, 0x10), 0xfebf_0000);
+            assert_eq!(m.sim.read16(b, COMMAND), 6);
+            got
+        };
+        // Valid tables: 4 entries at 0x2000 of BAR0; 256 entries filling
+        // BAR1 exactly.
+        assert_eq!(table(0x2000, 3), Some((0xfebf_2000, 64)));
+        assert_eq!(table(0x0001, 255), Some((0xfebf_8000, 4096)));
+        // The finding: an offset past the BAR (here 1 GiB above it), the
+        // largest offset, a table running off the BAR's end, and the
+        // largest table in a small BAR are all refused.
+        assert_eq!(table(0x4000_0000, 0), None);
+        assert_eq!(table(0xffff_fff8, 0x7ff), None);
+        assert_eq!(table(0x3ff8, 1), None);
+        assert_eq!(table(0x0001, 0x7ff), None);
+        // A BAR that is unassigned or an I/O BAR holds no table.
+        assert_eq!(table(0x0002, 0), None);
+        let mut m = device(0x0001, 0);
+        m.sim.write32(b, 0x14, 0x0000_c001);
+        let info = msix(&m, b).unwrap();
+        assert_eq!(msix_table(&mut m, b, &info), None);
     }
 
     #[test]

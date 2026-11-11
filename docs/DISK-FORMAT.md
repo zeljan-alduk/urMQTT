@@ -512,6 +512,7 @@ the scratch area is at the new end of the layout, which is the same place.
 | Superblocks | Result |
 |---|---|
 | both all zero | **blank**: formatted (below) |
+| an interrupted format (below) | **blank**: formatted again |
 | a valid v2 superblock | opened |
 | a valid v1 superblock only | refused (`OldVersion`), nothing is written |
 | anything else | refused, nothing is written |
@@ -522,7 +523,16 @@ the scratch area is at the new end of the layout, which is the same place.
 3. Write superblock slot A with `generation = 1`; flush.
 
 A crash before step 3 leaves a disk whose superblocks are still zero, so it is
-formatted again on the next boot. The telemetry header is written separately
+formatted again on the next boot. A crash during step 3 can tear the 4 KiB
+superblock write on a device with 512-byte sectors (R060-S1, ADR-370): the
+first sectors reach the medium, the rest stay zero. Such a disk is an
+**interrupted format** and is formatted again, never refused for good. It is
+recognised by all of: slot A starts with the magic and fails its CRC, slot A's
+last sector (the one holding the CRC) is all zero, slot B is all zero,
+size-table slot B does not decode, and size-table slot A either does not
+decode (an encrypted disk) or is the format's own (`seq = 0`, all sizes 0).
+A completed superblock's last sector is never zero, so a superblock that was
+once written whole and is damaged later is still refused (`BadChecksum`). The telemetry header is written separately
 when the log is first opened (§5.2).
 
 Since S1 this layout starts at the first sector of the boot disk's data
@@ -534,7 +544,7 @@ slot B's, which the first-boot head clearing also zeroes).
 - No region overlaps another or the header area (LBA 0 up to `align_sectors`).
 - A size in the size table never exceeds its (summed) region, and never covers data written after the last flush.
 - Every on-disk structure except SQLite's own files and record payloads has a CRC-32C, so a torn or stale structure is detected, never trusted.
-- A disk is only ever formatted when both superblock slots are all zero.
+- A disk is only ever formatted when both superblock slots are all zero, or when they are exactly an interrupted format (§6): a superblock write that never completed and no size ever committed.
 - The format has no pointers into memory and no host-endian fields.
 - **Superblock updates are single block writes to the slot not in force**, then a flush. A torn write leaves the slot invalid and the other slot in force.
 - A layout update never moves existing data (grow), or switches only after the copy is verified (migrate).

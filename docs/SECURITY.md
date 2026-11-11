@@ -21,12 +21,12 @@ which says what it gives up.
 |---|---|---|
 | Server TLS private key | In the image's configuration slot (ADR-215) | Impersonating the broker; decrypting nothing (TLS 1.3 is forward secret), but accepting devices. |
 | Session-ticket keys | Random per boot (CSPRNG), in RAM only; current for 12 h, previous for 12 h, then zeroised (H2, ADR-054) | Forging resumption tickets. Never stored, never derived from the image: a copy of the image or disk forges nothing. |
-| Traffic secrets | Per connection, in RAM, zeroized on drop | Reading or injecting one device's traffic. |
+| Traffic secrets | Per connection, in RAM, zeroized on drop (during the handshake too: one capture per session, ADR-340) | Reading or injecting one device's traffic. |
 | Device identities and the revocation list | CA embedded; revocations embedded and in SQLite | Who may connect. |
 | Control signing key (Ed25519) | **Offline**, never in the image: a file on an operator machine (dev) or an HSM/KMS behind `urmqtt-control --sign-cmd` (prod). The image holds only the public key (`deploy/<env>/control.pub`). | Revoking, unrevoking and allowlisting devices at runtime. |
 | Trust anchors by role | `[trust] operational` and `bootstrap` CA lists, embedded | Which CA grants which rights; rotation with overlap. |
 | Plaintext accounts (P1, opt-in) | Salted PBKDF2 hashes in the image's configuration slot (ADR-231), and, with `limits.max_runtime_accounts`, in the data disk's `accounts` table (NOW-15, ADR-285, ADR-286); the passwords are never stored, logged or sent to the broker by the operator tool | Logging in on the plaintext port or over WebSocket as a device. The hashes are public to whoever holds the image or the disk: use long random passwords. |
-| Disk key (S7, opt-in) | In the image's configuration slot (`storage.disk_key`), and in RAM while the disk is open (the cipher's round keys, wiped on drop). With `storage.disk_key_source = "console"` (LATER-7) **not in the image**: wrapped in the data partition's key slots under passphrases, unwrapped at boot from what the operator types on the console | Reading a stolen volume or snapshot; with the console source, also whoever has the ISO. A passphrase guessed offline from a copied header (one PBKDF2 per guess) gives the key (ADR-240, ADR-325). |
+| Disk key (S7, opt-in) | In the image's configuration slot (`storage.disk_key`), and in RAM while the disk is open (the cipher's round keys, wiped on drop). With `storage.disk_key_source = "console"` (LATER-7) **not in the image**: wrapped in the data partition's key slots under passphrases, unwrapped at boot from what the operator types on the console | Reading a stolen data volume that is not the boot disk; with the console source, also a snapshot of the whole disk and whoever has the ISO (with the key in the image, a snapshot of the single-disk VPS holds the key too: R060-S7, ADR-373). A passphrase guessed offline from a copied header (one PBKDF2 per guess) gives the key (ADR-240, ADR-325). |
 | Disk passphrases (LATER-7, opt-in) | Typed on the VM's console at boot, never stored, echoed or logged; the line buffer and the derived keys are wiped | Unlocking a copied disk. The provider's console and the hypervisor see it typed (ADR-326). |
 | Messages | In flight (RAM), retained and offline queues (SQLite), telemetry (log on the data disk) | Confidentiality and integrity of device data. |
 | Availability | — | The broker's purpose; the main target of a remote attacker. |
@@ -169,7 +169,15 @@ changes state without a new image, so it gets its own model.
 - Each core closes its live connections whose certificate serial is newly
   revoked, or whose identity left the allowlist.
 - A revoked device is refused at its next full handshake and at its next
-  resumption.
+  resumption. A full handshake reads the list when the client's Certificate is
+  verified and again at its Finished, so a revocation that lands while a client
+  holds back the rest of its flight still refuses it (ADR-361, test
+  `a_revocation_during_the_clients_flight_refuses_the_handshake`).
+- An identity that leaves the allowlist loses its connections that have not sent
+  CONNECT yet as well as its sessions, and no connection waits for its CONNECT
+  longer than 60 s after its handshake (ADR-362).
+- The Will of a connection closed for any of these reasons (revoked, disallowed,
+  account removed or changed) is dropped, delayed or not (ADR-364).
 - An account that was removed, or whose password hash or class changed, has its
   live plaintext and WebSocket logins closed by the cores that hold them; the
   next login sees the new table.
@@ -332,7 +340,11 @@ exists only so that opening the port to everyone is never an accident.
 2. **Failed logins lock the source address out** (`max_failed_auths_per_ip`
    failures in `lockout_s` seconds: 5 in 300 by default). A locked-out address
    gets no SYN-ACK either. The count is by address, not by user name, so nobody
-   can lock a user out from elsewhere (smoke `plaintext-lockout`).
+   can lock a user out from elsewhere (smoke `plaintext-lockout`). A successful
+   login does not clear the count (an account holder could otherwise guess other
+   accounts' passwords between its own logins without end), and a CONNECT on a
+   connection the address opened before its lock-out is refused unjudged
+   (ADR-363, test `logins_between_failures_do_not_save_an_address_from_the_lockout`).
 3. **Logins cost CPU and are admitted at a rate** (a password check is about
    25 ms of one core at the default 100 000 iterations under HVF on the test
    machine, an estimated 50 ms on a VPS vCPU; the rate is sized from a
@@ -344,9 +356,11 @@ exists only so that opening the port to everyone is never an accident.
    OWASP's 600 000 for PBKDF2-HMAC-SHA-256 (ADR-267).
 4. **Whatever the reason, a refused login looks the same and takes the same
    time**: no credentials, unknown user and wrong password are all CONNACK 4 and
-   exactly one password hash is computed on each path (host tests
-   `every_refusal_is_a_bad_login_with_one_code` and
-   `the_work_does_not_depend_on_whether_the_user_exists` in `urmqtt-plain::auth`).
+   exactly one password hash is computed on each path, at the dearest iteration
+   count of all accounts even for a cheaper account's hash (ADR-364) (host tests
+   `every_refusal_is_a_bad_login_with_one_code`,
+   `the_work_does_not_depend_on_whether_the_user_exists` and
+   `a_cheaper_account_takes_as_long_as_an_unknown_user` in `urmqtt-plain::auth`).
 
 ### Authentication modes
 
@@ -622,10 +636,29 @@ What that gives you and what it does not:
   compromised** from the day the release key exists (its secret was a
   passwordless CI secret); it is accepted only for the six releases it signed,
   and for each only the `SHA256SUMS` whose SHA-256 the key ring pins, so a
-  forged file signed with it is refused (docs/RELEASE.md section 9). The mirror is **not** a
+  forged file signed with it is refused (docs/RELEASE.md section 9). The signed
+  trusted comment (`urMQTT vX.Y.Z release <commit>`) must name the tag the
+  mirror lists the release under: a genuinely signed older release offered as a
+  newer one is a failed check (ADR-365). `urmqtt-config check-release` applies
+  the same rules (`--keyring` with `--tag`; with `--pubkey`, the ring built into
+  the tool and the tag of the trusted comment, ADR-366). The mirror is **not** a
   trust anchor: a modified template or sums file fails the check, and a failed
   check blocks the build unless you override it in a dialog that says what is
-  wrong. A release the mirror cannot verify is not offered at all.
+  wrong. A release the mirror cannot verify is not offered at all. **The tag is
+  the signed one:** the signature's trusted comment (`urMQTT vX.Y.Z release
+  <commit>`) must name the tag the mirror lists the release under, so the
+  correctly signed files of an older release cannot be offered, labelled and
+  named as a newer one (ADR-381; the mirror and `urmqtt-config check-release
+  --keyring --tag` check the same). The release's "GitHub" and "attestations"
+  links from the mirror's list are shown only when they are that release's pages
+  on github.com (ADR-383).
+- **Where the release key is.** Only in the Release workflow's `sign` job, in
+  the GitHub environment `release` (a required reviewer, `v*` tags only). That
+  job builds nothing: the `build` job, which runs third-party build code, holds
+  no secret and no write permission and refuses a tag whose commit is not on
+  `main`, and the job that publishes and attests builds nothing either; the key
+  reaches minisign through a pipe, never a file (ADR-380,
+  `scripts/check-release-workflow.py` in CI).
 - **What leaves the browser.** Only plain GET requests to the page's own site,
   for the release list and the release files. Certificates, private keys, the
   optional signing key, the settings and the finished ISO are never sent
@@ -753,6 +786,12 @@ power cut, and the broker goes on.
 
 - TLS 1.3 only, mutual TLS against the embedded trust anchors, the client id
   must equal the certificate's device id (smoke: `mqtt-tls`).
+- **The identity is unambiguous (ADR-360):** a subject with more than one CN, or
+  a CN that is not a UTF8String or PrintableString, has no identity, and nor has
+  a SAN with more than one `urn:urmqtt:` URI; `scripts/pki.sh sign-csr` builds
+  the subject itself and never copies a CSR's (test
+  `a_subject_with_two_cns_or_a_cn_of_another_string_type_has_no_identity`,
+  `scripts/test-pki.sh`).
 - **Trust anchors by role (H1, ADR-049):**
   - Operational CAs give device and service rights. Two side by side allow
     rotation with overlap (smoke `ca-rotation`).
@@ -818,7 +857,9 @@ Every resource is bounded. What happens at the limit is part of the design:
 | Plaintext connections | `plaintext.max_connections`, `plaintext.max_connections_per_ip` | SYN dropped without an answer, or refused at the ACK |
 | Failed plaintext logins from one address | `plaintext.max_failed_auths_per_ip` in `plaintext.lockout_s` | the address gets no SYN-ACK for `lockout_s` |
 | Password checks (CPU) | their own admission rate, sized from a boot-time measurement | SYN dropped before any hashing; TLS admission untouched |
-| Time to finish a handshake and CONNECT | 10 s (3 s while three quarters of the in-flight limit are taken) | connection aborted |
+| Time to finish a handshake (and, on the dev and plaintext ports, CONNECT) | 10 s (3 s while three quarters of the in-flight limit are taken) | connection aborted |
+| Time from the end of the handshake (WebSocket: the upgrade) to CONNECT | 60 s, not extended by partial input (ADR-362; before v0.6.1 there was none) | connection closed |
+| Time to finish a close the broker started (refused handshake, CONNECT or upgrade, metrics answer, keepalive or protocol close), ADR-355 | 5 s (fixed); in TCP, a closed connection whose peer keeps its window shut is given up after the retransmission bound (8 probes, about 4 minutes) | connection reset (RST), counted in the log (`tcp: N close(s) not finished within 5000 ms reset`); smoke `attack-zero-window-close` |
 | Free heap | `memory.min_free_mb` | new connections refused (smoke: `storm`) |
 | DB core backlog | 16 384 requests | new connections refused; registry updates skipped beyond 4 096 |
 | Connections per core | `limits.max_connections_per_core` | refused |
@@ -826,10 +867,11 @@ Every resource is bounded. What happens at the limit is part of the design:
 | Subscriptions per session | `limits.max_subscriptions_per_session` | SUBACK failure |
 | Shared-subscription groups per data core, members per group | `limits.max_shared_groups`, `limits.max_shared_group_members` (1024 each; ADR-275) | SUBACK 0x97 (3.1.1: 0x80), counted (`shared/joins/refused`) |
 | MQTT 5.0 topic-alias table per connection | `mqtt5.topic_alias_maximum` × (16 + `limits.max_topic_len`) bytes, 2 720 B by default | alias refused (DISCONNECT 0x94); counted in the heap statistics (`memory/topic_aliases`) and seen by the free-heap admission |
-| QoS 1 and 2 in flight, offline queue | `limits.max_inflight_qos1`, `limits.max_queued_per_offline_session` | queued; beyond the queue, new messages are dropped and counted |
+| QoS 1 and 2 in flight, offline queue | `limits.max_inflight_qos1` (at most 65 535, the packet ids; ADR-377), `limits.max_queued_per_offline_session` | queued; beyond the queue, new messages are dropped and counted |
 | QoS 2 ids awaiting PUBREL | `max(limits.max_inflight_qos1, 64)` per session (ADR-271) | one more closes the connection, counted (`messages/qos2/inbound_full`) |
 | Publish rate per device | `limits.publish_rate_per_device` | dropped and counted |
-| Output buffered per connection | 32 KiB | QoS 0 dropped, QoS 1 queued |
+| Output buffered per connection | 32 KiB for deliveries; the broker's own answers (CONNACK, PINGRESP, acknowledgements, SUBACK) up to 32 KiB + `limits.max_packet_size` + 4 KiB (ADR-375) | QoS 0 dropped, QoS 1 queued; a client that sends without reading its answers has its input held and its TCP window closed until it reads; one that ignores the closed window is disconnected once 2 MiB are held (DISCONNECT 0x97) |
+| TLS KeyUpdate answers | one per period in which the broker sends nothing else (RFC 8446 §4.6.3; ADR-350) | further `update_requested` records are applied but not answered until the broker sends again |
 | Receive window | broker backpressure | TCP window closes |
 | Cross-core fan-out | 16 384 messages per core pair | QoS 0 dropped, QoS 1 kept |
 | Telemetry backlog | 65 536 records per core | dropped and counted |
@@ -878,8 +920,16 @@ the two superblock slots is AES-256-XTS, one 512-byte sector per data unit,
 under a 64-byte key from the configuration; the superblock carries a keyed
 check so a wrong key is refused before anything is read (`docs/DISK-FORMAT.md`
 §14). What that does and does not do:
-- It protects a **stolen volume, snapshot or disk image**: registry, retained
-  and queued messages, telemetry and backups are unreadable without the key.
+- With the key in the image (`disk_key_source = "image"`, the default) it
+  protects the data partition only when it is taken **without the boot
+  partition**: the installer copies the image's configuration slot, key
+  included, to `/boot/urmqtt.cfg` on the ESP of the same disk (DISK-FORMAT §0),
+  so a **snapshot or copy of the whole single-disk VPS volume holds the key
+  next to the ciphertext and is readable** (R060-S7, ADR-373). What it does
+  protect: a copy of the data partition alone, released or reused blocks of
+  the provider's storage. Against a snapshot of the whole volume use
+  `disk_key_source = "console"` (the key is then in no image and on no disk,
+  only wrapped under passphrases).
 - It does **not** protect against a **stolen ISO** (the key is inside it: the
   configuration holds the TLS private key as well), against someone who can
   read the running machine's memory, or against the cloud provider's
@@ -930,7 +980,12 @@ console at every boot, before the store opens and before any listener exists.
 - **Rotation:** a passphrase change rewrites only the header, twice, so that no
   superblock keeps the old wrap (a cut between the two writes is repaired at the
   next open); the disk key itself is rotated by the offline `urmqtt-disk rekey`
-  (a full rewrite), which empties the key slots.
+  (a full rewrite), which empties the key slots. **A passphrase change does not
+  lock out a leaked passphrase** (R060-S3, ADR-372): the disk key stays the
+  same, so whoever holds an earlier copy of the header (a provider snapshot, a
+  backup of the image) and the old passphrase unwraps the key from that copy,
+  and it decrypts the current disk and everything written later. After a leak,
+  `urmqtt-disk rekey` (with the VM stopped), then `keys add` a fresh passphrase.
 - **Not protected:** the hypervisor (it sees the passphrase typed and the key in
   RAM), a stolen running VM, and the integrity of the data (XTS). No TPM, no
   network unlock (ADR-329).
@@ -949,6 +1004,12 @@ scope or bypasses it; `auto` goes on with a warning; `off` (the default) leaves 
 it. What it does not cover: interrupt remapping, reserved regions the firmware lists, more than 4 units or 32
 ID ranges per unit, and any hardware other than QEMU's models (ADR-307). The firmware tables it reads (DMAR,
 IVRS, IORT, the device tree) are fuzzed (`iommu_tables`).
+
+The IOMMU stops a device's DMA, not the kernel's own writes to device registers. Those go wherever the
+device's BARs and capabilities point, so the kernel checks the addresses (ADR-345): each virtio structure and
+the MSI-X table must lie inside its BAR (sized by probing), and no device mapping may overlap RAM in the memory
+map. Before v0.6.1 the MSI-X table's offset and size were not checked against the BAR, and a hostile device
+could have the kernel write its MSI entries into RAM up to 4 GiB above the BAR.
 
 ### Supply chain
 
@@ -983,7 +1044,7 @@ SHA-pinned CI actions; OpenSSF Scorecard; SLSA provenance on releases.
 | No memory tagging on x86_64, on HVF or on most clouds; the SQLite arena and DMA buffers are never tagged. | FEAT_MTE2 is rare in VPS hardware (ADR-174). | The software checks of ADR-170. |
 | No DMA isolation (IOMMU) on bare metal. | Deferred with bare metal (ADR-176); irrelevant to a VPS, whose devices are the hypervisor's. | None needed for a VM. |
 | A kernel that dies before its block driver runs is not counted as a failed A/B trial. | The bootloader keeps no boot counter the kernel could use (ADR-295, ADR-296); the counter is the kernel's. | The trial timeout and every later crash are counted; `urmqtt-disk slots rollback` offline. A loader-level one-shot entry (BLI) would close it; it needs UEFI runtime services in the kernel, which LATER-6 did not add (ADR-324). |
-| Downgrade protection is the offline tool's rule, not the firmware's. | No version counter exists (H8-W6, ADR-322); an attacker who can write the disk can write any older signed image that was not revoked. | `slots stage` refuses an older release (unless `--allow-downgrade`) and a kernel older than the store's schema, always; release images are staged only with their minisign signature. Under Secure Boot, revoke a superseded or leaked image by its loaders' Authenticode hashes in `dbx` (docs/secure-boot-keys.md, tested in OVMF and AAVMF). |
+| Downgrade protection is the offline tool's rule, not the firmware's. | No version counter exists (H8-W6, ADR-322); an attacker who can write the disk can write any older signed image that was not revoked. | `slots stage` and `update-boot` (also `--in-place` on an A/B disk, ADR-368) refuse an older release (unless `--allow-downgrade`), a kernel older than the store's schema, always, and a configuration format the kernel does not read; on an A/B disk a kernel without a build note is refused. A single-slot disk updated to a kernel before v0.6.0 (no build note) is not judged. Release images are staged only with their minisign signature. Under Secure Boot, revoke a superseded or leaked image by its loaders' Authenticode hashes in `dbx` (docs/secure-boot-keys.md, tested in OVMF and AAVMF). |
 | Secure Boot rests on keys the operator holds, and nothing here is signed by the project. | Release images are unsigned (ADR-251, ADR-324); shim/MOK is not supported, so firmware that trusts only Microsoft's keys cannot boot them under Secure Boot; Proxmox, real PCs and cloud firmware are untested. | Your own PK/KEK/db, kept as docs/secure-boot-keys.md describes; `sign-iso` after configuring. |
 | DMA isolation is off by default, and only tested against QEMU's IOMMU models. | `devices.iommu` (ADR-305) gives every driven device a domain with only its own pages, through VT-d, AMD-Vi or SMMUv3; it is `off` by default because a VPS's devices are the hypervisor's and an emulated IOMMU slows every DMA. Not run on real hardware; interrupt remapping is not enabled; reserved regions (RMRR/IVMD/RMR) are not mapped (ADR-307). With a GICv2m frame a device can still raise any SPI of the frame. | `devices.iommu = "require"` on bare metal or under a hypervisor whose device models you do not trust: the broker then refuses to boot without a working IOMMU covering every driven device, and `$SYS/broker/iommu/faults` counts blocked DMA. |
 | The hypervisor sees everything. | Out of scope. | Choose the host. |

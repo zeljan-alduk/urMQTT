@@ -908,6 +908,12 @@ def verify_signature(minisign: str, pubkey: Path, message: Path, signature: Path
     return ""
 
 
+def comment_tag(comment: str) -> str | None:
+    """The tag a release's trusted comment names (`urMQTT v0.6.0 release <commit>` -> `v0.6.0`)."""
+    m = re.match(r"urMQTT (\S+)", comment)
+    return m.group(1) if m else None
+
+
 def find_config_slot(path: Path) -> int | None:
     """Format version (u16, little endian) of the first configuration slot in the
     image, or None. A slot is the 16-byte marker at a 512-byte aligned offset,
@@ -1057,6 +1063,16 @@ def fetch_and_verify_sums(ctx: Context, plan: Plan, work: Path, checked: Checked
     key = pick_key(ctx, parts[1][1], tag)
     check_pin(key, tag, parts[0][1])
     comment = verify_signature(ctx.minisign, key.path, parts[0][1], parts[1][1])
+    # The signature must be for this tag (trusted comment `urMQTT <tag> release <commit>`): the
+    # signed SHA256SUMS of an older release under a newer tag is refused (security review of
+    # v0.6.0, SUPPLY-2, ADR-381).
+    signed_tag = comment_tag(comment)
+    if signed_tag != tag:
+        raise ReleaseFailure(
+            "verification-failed",
+            f"the signature is for {printable(signed_tag or 'no release tag', 64)}, not {printable(tag, 64)} "
+            f"(trusted comment {printable(comment, 120)!r}): another release under this tag",
+        )
     try:
         sums = parse_sums(parts[0][1].read_text(encoding="utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:

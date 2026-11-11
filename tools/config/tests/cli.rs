@@ -1520,3 +1520,32 @@ fn a_sealed_image_is_not_configured_afterwards() {
     let e = image::configure_raw(&raw, &lab_blob()).err().unwrap();
     assert!(e.contains("sealed for Secure Boot"), "{e}");
 }
+
+/// BOOT-5 (security review v0.6.0, ADR-367): the format rule was read from the template's slot only
+/// while that slot was empty, and was the tool's own format after that. A v0.5.0 template (its kernel
+/// reads up to format 13) that was configured once took, when configured again, any format this tool
+/// writes: an image its kernel refuses at boot. The installation image's unconfigured slot still says
+/// what the kernel reads.
+#[test]
+fn reconfiguring_a_configured_old_template_keeps_the_format_rule() {
+    use urmqtt_cfg::build::Builder;
+    use urmqtt_cfg::fields::tag;
+    let empty13 = Builder::new().finish_as(false, 13).unwrap();
+    let (tpl, _) = synthetic_template_with(&empty13);
+    let mut b = Builder::new();
+    b.variant(tag::NET_IPV6, 1).unwrap();
+    let ipv6 = b.finish(false).unwrap();
+    // Directly: refused, as documented.
+    assert!(image::configure_iso(&tpl, &ipv6).is_err());
+    // Configured once, then again: refused too.
+    let once = image::configure_iso(&tpl, &lab_blob()).unwrap();
+    let e = image::configure_iso(&once.bytes, &ipv6)
+        .err()
+        .expect("refused");
+    assert!(
+        e.contains("it reads up to 13: its unconfigured slot says so"),
+        "{e}"
+    );
+    // A configuration the kernel reads can still be put in again.
+    assert!(image::configure_iso(&once.bytes, &lab_blob()).is_ok());
+}

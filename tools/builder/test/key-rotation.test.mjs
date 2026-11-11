@@ -26,6 +26,7 @@ before(async () => {
     rotation: true,
     releases: (small, _big, { oldKey }) => [
       { tag: 'v0.6.0', prerelease: true, published: '2026-11-09T09:00:00Z', template: small, signer: oldKey },
+      { tag: 'v0.5.2', prerelease: true, published: '2026-11-08T10:00:00Z', template: small, signedAs: 'v0.5.0' },
       { tag: 'v0.5.1', prerelease: true, published: '2026-11-08T09:00:00Z', template: small, signer: stranger },
       { tag: 'v0.5.0', prerelease: true, published: '2026-11-07T09:00:00Z', template: small },
       { tag: 'v0.4.1', prerelease: true, published: '2026-11-05T09:00:00Z', template: small, signer: oldKey },
@@ -93,6 +94,14 @@ test('the former test key is refused for a release newer than its range', async 
   const v = await select('v0.6.0');
   assert.match(v, /^ub-verify bad \|/);
   assert.ok(v.includes(`key ${site.oldKey.idText}, the project's former test key, is trusted for v0.1.0 to v0.4.1 only, not for v0.6.0`), v);
+});
+
+// ADR-365 (security review v0.6.0, BOOT-1): the mirror lists a genuinely signed older release (its trusted
+// comment says v0.5.0) under a newer tag; the release key covers both tags, so only the comment tells them apart.
+test('a signed older release listed under a newer tag is refused', async () => {
+  const v = await select('v0.5.2');
+  assert.match(v, /^ub-verify bad \|/);
+  assert.ok(v.includes('SHA256SUMS is signed as "urMQTT v0.5.0 test fixture", not as v0.5.2'), v);
 });
 
 test('a signature by a key the page does not know is refused', async () => {

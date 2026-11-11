@@ -55,16 +55,24 @@ function commentTag(comment) {
 }
 
 /**
- * Verifies `sig` over `sums` with the key the signature names, and checks that
- * the key may sign `tag` (for a file from the computer, `tag` is null and the
- * tag of the signed comment counts). Returns {v, key}; throws with the reason.
+ * Verifies `sig` over `sums` with the key the signature names, checks that the
+ * signed trusted comment names `tag` and that the key may sign `tag` (for a file
+ * from the computer, `tag` is null and the tag of the signed comment counts).
+ * Returns {v, key}; throws with the reason.
  */
 function verifyWithKeys(builder, tag, sums, sig) {
   const id = builder.minisigKeyId(sig);
   const key = RELEASE_KEYS.find(k => k.keyId === id);
   if (!key) throw new Error(`SHA256SUMS.minisig was made with key ${id}, which this page does not trust (it trusts ${RELEASE_KEYS.map(k => k.keyId).join(', ')})`);
   const v = builder.verifyRelease(key.text, sums, sig);
-  const forTag = tag || commentTag(v.trusted_comment);
+  const signedTag = commentTag(v.trusted_comment);
+  // The tag the mirror claims is not trusted: the signature must be for that tag (its trusted
+  // comment, `urMQTT <tag> release <commit>`), or the signed SHA256SUMS of an older release could be
+  // offered as a newer one (security review of v0.6.0, SUPPLY-2, ADR-381).
+  if (tag && signedTag !== tag) {
+    throw new Error(`the signature is for ${signedTag || 'no release tag'}, not ${tag} (SHA256SUMS is signed as "${v.trusted_comment}", not as ${tag}): a signed file of one release is never accepted as another, the mirror offers another release under this tag (ADR-365)`);
+  }
+  const forTag = tag || signedTag;
   const who = `key ${id}${key.formerTest ? ", the project's former test key," : ''}`;
   if (!keyCovers(key, forTag)) {
     const range = key.validTo ? `${key.validFrom || 'the first release'} to ${key.validTo}` : `${key.validFrom} and later`;
@@ -96,15 +104,36 @@ function releaseProblem(r) {
   return '';
 }
 
+/**
+ * `link` if it is `https://github.com/<owner>/<repo>/<page>` (with `/<tag>` appended for a tag page,
+ * the tag percent-encoded or not) and, when the list names its GitHub source, of that repository; else ''.
+ */
+function releaseLink(link, source, page, tag) {
+  if (typeof link !== 'string') return '';
+  const m = /^https:\/\/github\.com\/([A-Za-z0-9._-]+\/[A-Za-z0-9._-]+)\/(.*)$/.exec(link);
+  if (!m) return '';
+  if (source && !source.startsWith(`https://github.com/${m[1]}/`)) return '';
+  if (tag === null) return m[2] === page || m[2] === page + '/' ? link : '';
+  if (typeof tag !== 'string' || !tag) return '';
+  return m[2] === page + tag || m[2] === page + encodeURIComponent(tag) ? link : '';
+}
+
 /** Loads and normalises releases.json. */
 async function loadReleases(url) {
   const res = await fetch(url, { cache: 'no-cache', credentials: 'omit' });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const j = await res.json();
   if (!j || j.schema !== 1 || !Array.isArray(j.releases)) throw new Error('not a releases.json of schema 1');
-  const releases = j.releases.map(r => ({ ...r, usable: releaseProblem(r) === '', problem: releaseProblem(r) }));
   // Where the releases are published, for a link: only a GitHub address is ever shown as one.
   const source = typeof j.source === 'string' && /^https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/releases\/?$/.test(j.source) ? j.source : '';
+  const releases = j.releases.map(r => {
+    const out = { ...r, usable: releaseProblem(r) === '', problem: releaseProblem(r) };
+    // The links of a release are shown as links only when they are its GitHub pages (security review of
+    // v0.6.0, SUPPLY-4): a mirror cannot send the visitor to a look-alike "verification" page.
+    out.url = releaseLink(r.url, source, 'releases/tag/', r.tag);
+    out.attestations = releaseLink(r.attestations, source, 'attestations', null);
+    return out;
+  });
   return { generated: j.generated, keyId: j.key_id, source, releases };
 }
 

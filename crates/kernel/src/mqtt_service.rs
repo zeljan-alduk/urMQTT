@@ -126,7 +126,10 @@ struct Conn {
     remote_close: bool,
     /// We are closing: close_notify and FIN after `pending`.
     closing: bool,
-    fin_sent: bool,
+    /// How far the close went: `FIN_SENT` (TCP was told to close) and
+    /// `LINGERING` (it has its deadline in `MqttService::linger`, ADR-355).
+    /// One byte for both: `Conn` has a byte budget (ADR-034).
+    close_step: u8,
     /// The low 32 bits of `urmqtt_tls::serial_tag` of the client
     /// certificate (0: none yet, or plaintext), to find the live
     /// connections of a revoked serial (H1). 32 bits fit the struct's
@@ -135,6 +138,11 @@ struct Conn {
     /// full.
     serial_tag: u32,
 }
+
+/// `Conn::close_step`: TCP was told to close (FIN after the data).
+const FIN_SENT: u8 = 1;
+/// `Conn::close_step`: the close has its deadline (ADR-355).
+const LINGERING: u8 = 2;
 
 /// A connection counted by [`Admission`] as a handshake in flight. Kept
 /// beside the connection, not in it: only a few exist at a time and `Conn`
@@ -239,6 +247,11 @@ pub struct MqttService {
     ready: Vec<ConnId>,
     /// Connections to reset (handshake timeouts), for the network loop.
     aborts: Vec<u32>,
+    /// Closing connections and their deadline (ADR-355): a close TCP has not
+    /// finished in `CLOSE_LINGER_MS` is reset, whatever the peer does.
+    linger: urmqtt_net::linger::Linger,
+    /// Closes reset at their deadline, for the log (powers of two).
+    lingered: u64,
     /// The control epoch this core last acted on (H1).
     control_epoch: u64,
     /// The broker's unauthorized-control counter at the last report.
@@ -384,16 +397,23 @@ impl DbLink {
     }
 }
 
+/// A configured `u32` limit as the `u16` the MQTT codec takes, saturating:
+/// `as u16` turned 65 536 into 0 (every topic refused) and 65 537 into 1
+/// (ADR-346).
+pub(crate) fn limit16(v: u32) -> u16 {
+    u16::try_from(v).unwrap_or(u16::MAX)
+}
+
 pub fn broker_config(max_connections: usize, fanout: bool) -> Config {
     let l = CONFIG.limits;
     Config {
         limits: Limits {
             max_packet_size: l.max_packet_size,
-            max_topic_len: l.max_topic_len as u16,
-            max_topic_levels: l.max_topic_levels as u16,
+            max_topic_len: limit16(l.max_topic_len),
+            max_topic_levels: limit16(l.max_topic_levels),
             // Identities become topic levels, so the topic bound applies.
-            max_client_id_len: l.max_topic_len as u16,
-            max_topics_per_packet: l.max_subscriptions_per_session as u16,
+            max_client_id_len: limit16(l.max_topic_len),
+            max_topics_per_packet: limit16(l.max_subscriptions_per_session),
         },
         max_connections: max_connections.min(l.max_connections_per_core as usize),
         max_subscriptions_per_session: l.max_subscriptions_per_session as usize,
@@ -656,6 +676,8 @@ impl MqttService {
             last_shrink_ms: 0,
             ready: Vec::new(),
             aborts: Vec::new(),
+            linger: urmqtt_net::linger::Linger::default(),
+            lingered: 0,
             control_epoch: crate::control::epoch(),
             dropped_control_seen: 0,
             retained_refused_seen: (0, 0),
@@ -1092,7 +1114,7 @@ impl MqttService {
                 outq: None,
                 remote_close: false,
                 closing: false,
-                fin_sent: false,
+                close_step: 0,
                 serial_tag: 0,
             },
         );
@@ -1755,6 +1777,7 @@ impl MqttService {
         if self.handshakes.is_empty() {
             self.handshakes.shrink_to_fit();
         }
+        self.linger.shrink();
         if self.blocked.is_empty() {
             self.blocked.shrink_to_fit();
         }
@@ -1778,6 +1801,7 @@ impl MqttService {
             self.broker.tick(now_ms);
             self.cut_revoked(now_ms);
             self.expire_handshakes(link, now_ms);
+            self.expire_closes(link, now_ms);
             self.ws_expire(link, now_ms);
             self.metrics_expire(now_ms);
             self.publish_admission(now_ms);
@@ -1828,7 +1852,7 @@ impl MqttService {
         let mut still = Vec::new();
         for c in blocked {
             activity = true;
-            if self.push_to_tcp(c, tcp, link) {
+            if self.push_to_tcp(c, tcp, link, now_ms) {
                 still.push(c);
             }
         }
@@ -2182,7 +2206,7 @@ impl MqttService {
 
     /// Moves relayed replies and pending bytes into TCP and finishes a
     /// close. Returns whether bytes are still waiting.
-    fn push_to_tcp(&mut self, c: u32, tcp: &mut TcpStack, link: &mut Link) -> bool {
+    fn push_to_tcp(&mut self, c: u32, tcp: &mut TcpStack, link: &mut Link, now_ms: u64) -> bool {
         let Some(k) = self.conns.get_mut(&c) else {
             return false;
         };
@@ -2234,11 +2258,51 @@ impl MqttService {
             k.pending.consume(n);
         }
         k.pending.release();
-        if k.closing && k.pending.is_empty() && !k.fin_sent {
-            k.fin_sent = true;
+        if k.closing && k.pending.is_empty() && k.close_step & FIN_SENT == 0 {
+            k.close_step |= FIN_SENT;
             tcp.close(c);
         }
+        // Every close passes here (each path that sets `closing` lists the
+        // connection in `blocked`): from now on it has a deadline, so a peer
+        // that never takes the last bytes or the FIN cannot hold it (ADR-355).
+        if k.closing && k.close_step & LINGERING == 0 {
+            k.close_step |= LINGERING;
+            self.linger.start(now_ms, c, k.tconn);
+        }
         !k.pending.is_empty() || k.outq.is_some()
+    }
+
+    /// Resets closing connections that TCP has not finished closing within
+    /// `CLOSE_LINGER_MS` (ADR-355): a peer that shut its window (or went
+    /// silent) after a refused handshake, CONNECT or upgrade, a metrics
+    /// answer or any close the broker started held the connection and its
+    /// heap for minutes, or for ever (NETDOS-1, NETDOS-2).
+    fn expire_closes(&mut self, link: &mut Link, now_ms: u64) {
+        if self.linger.is_empty() {
+            return;
+        }
+        let mut due = Vec::new();
+        let conns = &self.conns;
+        self.linger.expire(
+            now_ms,
+            |c, tconn| conns.get(&c).is_some_and(|k| k.tconn == tconn),
+            &mut due,
+        );
+        for c in due {
+            self.lingered += 1;
+            if self.lingered.is_power_of_two() {
+                warn!(
+                    "tcp: {} close(s) not finished within {} ms reset on core {}",
+                    self.lingered,
+                    urmqtt_net::linger::CLOSE_LINGER_MS,
+                    self.me
+                );
+            }
+            self.detach(c, link, now_ms);
+            self.leave_flight(c, Leave::Failed, now_ms);
+            self.drop_conn(c, now_ms);
+            self.aborts.push(c);
+        }
     }
 
     /// Closes connections that never finished their handshake (or, on the

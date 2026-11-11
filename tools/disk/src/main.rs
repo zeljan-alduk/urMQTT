@@ -15,17 +15,19 @@
 //!                                                on a larger disk, optionally configured; the first
 //!                                                boot formats the data
 //! urmqtt-disk update-boot DISK --esp ESP --write [--config BLOB|SLOT | --keep-config | --replace-config]
-//!                    [--allow-unsealed]
+//!                    [--allow-unsealed] [--in-place] [--allow-downgrade]
 //!                                                replace the kernel (ESP), keep the data. The disk's
 //!                                                configuration slot (C1c) is kept whenever it holds a
 //!                                                real configuration (the default, whatever the new ESP
 //!                                                carries); --config sets one, --replace-config takes
-//!                                                the new ESP's own
+//!                                                the new ESP's own. A kernel with a build note is held
+//!                                                to the rules of `slots stage` (ADR-368)
 //! urmqtt-disk slots status DISK                  the two boot slots of an A/B disk (v0.6.0, NEXT-11):
 //!                                                region, release, state, the disk GUID the control
 //!                                                messages name
 //! urmqtt-disk slots stage DISK (--image RELEASE.img --sums SHA256SUMS --sig SHA256SUMS.minisig
-//!                    --pubkey minisign.pub [--pubkey ...] | --esp ESP --unsigned | --image IMG --unsigned)
+//!                    (--keyring keys/release-keys.json | --pubkey minisign.pub [--pubkey ...])
+//!                    | --esp ESP --unsigned | --image IMG --unsigned)
 //!                    [--config BLOB|SLOT | --keep-config | --replace-config] [--allow-downgrade]
 //!                    [--allow-unsealed] --write
 //!                                                write the standby slot (the configuration is carried
@@ -466,7 +468,7 @@ fn export_db(path: &str, out: &str) -> Result<(), String> {
     .ok_or("store not installed")?
     .map_err(|e| format!("reading the database: {e:?}"))?;
     drop(store);
-    std::fs::write(out, &bytes).map_err(|e| format!("{out}: {e}"))?;
+    write_private(out, &bytes)?;
     eprintln!(
         "export-db: {out}: {} bytes, WAL applied (in memory; {path} unchanged)",
         bytes.len()
@@ -681,13 +683,16 @@ fn update_boot(
     write: bool,
     in_place: bool,
     allow_unsealed: bool,
+    allow_downgrade: bool,
     policy: &config::Policy,
 ) -> Result<(), String> {
     let esp = std::fs::read(esp).map_err(|e| format!("{esp}: {e}"))?;
+    let db_schema = disk_store_schema(path);
     let mut dev = FileDisk::open(path, write)?;
     // An A/B disk (ADR-299): the running slot would be overwritten in place,
     // with no way back if the new kernel fails.
     let ab = matches!(slots::read(&mut dev), Ok(Some(_)));
+    let mut running: Option<slots::Slot> = None;
     if let Ok(Some(s)) = slots::read(&mut dev) {
         if !in_place {
             return Err(format!(
@@ -698,6 +703,7 @@ fn update_boot(
         if s.active().state.trial {
             return Err(ab::slot_error(&slots::SlotError::TrialPending));
         }
+        running = Some(s.active());
     }
     let f = inspect(&mut dev)?;
     let t = f.primary.as_ref().ok_or("no valid primary GPT")?;
@@ -720,6 +726,57 @@ fn update_boot(
     if let Some(w) = config::keep_sealed(&old, &esp, allow_unsealed)? {
         eprintln!("update-boot: {w}");
     }
+    // ADR-368: the rules of `slots stage`, here too. The kernels' build note
+    // says what they are; the configuration must be one they read, the store
+    // one they can open, and an older release needs --allow-downgrade. On an
+    // A/B disk a kernel without a note is refused (the slot would record it as
+    // a way back it is not); on a disk with one slot, a kernel before v0.6.0
+    // has none and is judged by nothing (as before).
+    let note = if ab {
+        Some(
+            ab::note_of(&esp)
+                .map_err(|e| format!("--in-place on a disk with two boot slots: {e}"))?,
+        )
+    } else {
+        slots::find_notes(&esp).into_iter().next()
+    };
+    if let Some(n) = &note {
+        if let Some(fmt) = ab::config_format(&esp)
+            && fmt > n.cfg_format
+        {
+            return Err(format!(
+                "the configuration is format {fmt}, this kernel reads formats up to {}: it would refuse it at boot",
+                n.cfg_format
+            ));
+        }
+        let warn = match &running {
+            Some(a) => ab::rules(n, a, db_schema, allow_downgrade)?,
+            // One slot: the running kernel is known by its own note, if it
+            // has one (v0.6.0 and later); else only the store is judged.
+            None => match slots::find_notes(&old).into_iter().next() {
+                Some(was) => ab::rules_for(
+                    n,
+                    &was.version,
+                    was.schema,
+                    "the running kernel's store schema",
+                    db_schema,
+                    allow_downgrade,
+                )?,
+                None => match db_schema {
+                    Some(store) if n.schema < store => {
+                        return Err(format!(
+                            "this kernel writes store schema {} but the store on the disk is schema {store}: it would refuse the store (a store migration is one-way, docs/DISK-FORMAT.md §5.1.1). Never allowed",
+                            n.schema
+                        ));
+                    }
+                    _ => Vec::new(),
+                },
+            },
+        };
+        for w in warn {
+            println!("update-boot: warning: {w}");
+        }
+    }
     println!(
         "update-boot: {}\nupdate-boot: before: {}\nupdate-boot: after:  {}\nupdate-boot: {}",
         what,
@@ -735,7 +792,6 @@ fn update_boot(
         );
         return Ok(());
     }
-    let note = slots::find_notes(&esp).into_iter().next();
     dev.write(e.first_lba, &esp)
         .map_err(|e| format!("write: {e:?}"))?;
     dev.flush().map_err(|e| format!("flush: {e:?}"))?;
@@ -768,6 +824,8 @@ struct SlotArgs {
     sums: Option<String>,
     sig: Option<String>,
     pubkeys: Vec<String>,
+    /// The release key ring (`keys/release-keys.json`): key ranges and pins (SUPPLY-3).
+    keyring: Option<String>,
     unsigned: bool,
     allow_downgrade: bool,
     /// Stage an unsealed ESP onto a disk whose active slot is sealed (ADR-320).
@@ -846,25 +904,39 @@ fn slots_stage(path: &str, a: &SlotArgs) -> Result<(), String> {
                 "UNSIGNED image (--unsigned): nothing vouches for it".to_string()
             } else {
                 let (Some(sums), Some(sig)) = (&a.sums, &a.sig) else {
-                    return Err("--image needs --sums SHA256SUMS --sig SHA256SUMS.minisig --pubkey minisign.pub (or --unsigned for an image you built)".into());
+                    return Err("--image needs --sums SHA256SUMS --sig SHA256SUMS.minisig --keyring keys/release-keys.json (or --unsigned for an image you built)".into());
                 };
-                if a.pubkeys.is_empty() {
+                if a.keyring.is_some() && !a.pubkeys.is_empty() {
                     return Err(
-                        "--pubkey minisign.pub is required to check the release signature".into(),
+                        "give --keyring or --pubkey, not both (the key ring names its keys)".into(),
                     );
                 }
-                let keys = a
-                    .pubkeys
-                    .iter()
-                    .map(|k| std::fs::read_to_string(k).map_err(|e| format!("{k}: {e}")))
-                    .collect::<Result<Vec<_>, _>>()?;
                 let sums = std::fs::read(sums).map_err(|e| format!("{sums}: {e}"))?;
                 let sig = std::fs::read_to_string(sig).map_err(|e| format!("{sig}: {e}"))?;
                 let name = std::path::Path::new(img)
                     .file_name()
                     .and_then(|n| n.to_str())
                     .ok_or("the image path has no file name")?;
-                ab::verify_release(name, &bytes, &sums, &sig, &keys)?
+                if let Some(ring) = &a.keyring {
+                    // Key ranges and pins, the tag the signature names (SUPPLY-3, ADR-382).
+                    let keys = urmqtt_config_tool::keyring::load(std::path::Path::new(ring))?;
+                    ab::verify_release_ring(name, &bytes, &sums, &sig, &keys)?
+                } else {
+                    if a.pubkeys.is_empty() {
+                        return Err(
+                            "--keyring keys/release-keys.json (or --pubkey minisign.pub) is required to check the release signature".into(),
+                        );
+                    }
+                    eprintln!(
+                        "stage: --pubkey without --keyring: every given key is accepted for every tag (no key ranges, no pins); --keyring keys/release-keys.json checks them"
+                    );
+                    let keys = a
+                        .pubkeys
+                        .iter()
+                        .map(|k| std::fs::read_to_string(k).map_err(|e| format!("{k}: {e}")))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    ab::verify_release(name, &bytes, &sums, &sig, &keys)?
+                }
             };
             (ab::esp_of_image(&bytes)?, origin)
         }
@@ -1278,6 +1350,23 @@ fn keys_cmd(path: &str, sub: Option<&str>, a: KeysArgs) -> Result<(), String> {
         .as_deref()
         .map(keys::read_passphrase)
         .transpose()?;
+    // The header can be copied and guessed offline at one PBKDF2 per guess
+    // (R060-S4, ADR-374): say so when a new slot is cheaper than usual.
+    if let Some(p) = &new {
+        if p.len() < 20 {
+            eprintln!(
+                "keys: warning: the new passphrase has {} characters; a copied header is guessed offline at one PBKDF2 per guess: use a generated one of 20 or more (openssl rand -base64 24)",
+                p.len()
+            );
+        }
+        if a.iterations < urmqtt_store::keyslot::DEFAULT_ITERATIONS {
+            eprintln!(
+                "keys: warning: --iterations {} is below the default {}: every offline guess at the new slot is that much cheaper",
+                a.iterations,
+                urmqtt_store::keyslot::DEFAULT_ITERATIONS
+            );
+        }
+    }
     if op == keys::Op::Unwrap && matches!(auth, keys::Auth::Passphrase(_)) && a.key_out.is_none() {
         return Err("unwrap with a passphrase: give --key-out FILE, where the key is written (the image needs it from now on)".into());
     }
@@ -1324,7 +1413,7 @@ fn keys_cmd(path: &str, sub: Option<&str>, a: KeysArgs) -> Result<(), String> {
     )?;
     let what = match (done.op, done.slot) {
         (keys::Op::Add, Some(s)) => format!("key slot {s}: the disk key is wrapped under the new passphrase"),
-        (keys::Op::Change, Some(s)) => format!("key slot {s}: new passphrase; the old one no longer opens the disk"),
+        (keys::Op::Change, Some(s)) => format!("key slot {s}: new passphrase; the disk key is the same, so a copy of the old header still opens the disk with the old passphrase (if it leaked: rekey, then keys add)"),
         (keys::Op::Remove, Some(s)) => format!("key slot {s}: emptied"),
         _ => "every key slot emptied: the key must come from the image (storage.disk_key_source = \"image\", storage.disk_key)".into(),
     };
@@ -1354,6 +1443,27 @@ fn write_secret(path: &str, bytes: &[u8]) -> Result<(), String> {
         .open(path)
         .map_err(|e| format!("{path}: {e} (it must not exist yet)"))?;
     f.write_all(bytes)
+        .and_then(|()| f.sync_all())
+        .map_err(|e| format!("{path}: {e}"))
+}
+
+/// Writes a plaintext copy of the store (the database of `export-db`, a
+/// snapshot of `backup-extract`): it holds the account hashes, revocations,
+/// retained and queued messages, which on an encrypted disk exist nowhere
+/// else in the clear. So it is readable by its owner only (0600, also when
+/// the file already existed, before a byte is written), and synced
+/// (R060-S2, ADR-371). Unlike `--key-out` it may replace an existing file.
+fn write_private(path: &str, bytes: &[u8]) -> Result<(), String> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("{path}: {e}"))?;
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .and_then(|()| f.write_all(bytes))
         .and_then(|()| f.sync_all())
         .map_err(|e| format!("{path}: {e}"))
 }
@@ -1606,7 +1716,7 @@ fn backup_extract(path: &str, out: &str, slot: Option<usize>) -> Result<(), Stri
         &mut data,
     )
     .map_err(|e| format!("{e:?}"))?;
-    std::fs::write(out, &data).map_err(|e| format!("{out}: {e}"))?;
+    write_private(out, &data)?;
     eprintln!(
         "backup-extract: {out}: snapshot seq {} of slot {i}, {} bytes, taken at unix {}",
         h.seq,
@@ -1790,6 +1900,7 @@ fn run(args: &[String]) -> Result<(), String> {
                     .filter(|(_, a)| *a == "--pubkey")
                     .filter_map(|(i, _)| args.get(i + 1).cloned())
                     .collect(),
+                keyring: opt("--keyring"),
                 unsigned: flag("--unsigned"),
                 allow_downgrade: flag("--allow-downgrade"),
                 allow_unsealed: flag("--allow-unsealed"),
@@ -1845,6 +1956,7 @@ fn run(args: &[String]) -> Result<(), String> {
             flag("--write"),
             flag("--in-place"),
             flag("--allow-unsealed"),
+            flag("--allow-downgrade"),
             &policy()?,
         ),
         Some("migrate") => migrate_cmd(

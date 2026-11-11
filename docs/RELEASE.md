@@ -59,7 +59,9 @@ sums; the builder page uses the template only):
 4. `cargo vet regenerate imports && cargo vet prune` (docs/SUPPLY-CHAIN.md asks for it at each release); commit the
    result if it changed anything.
 5. The signing key. `minisign.pub` in the repository is the release key (section 9); its secret half must be in the
-   repository secret `MINISIGN_SECRET_KEY` (a passwordless key, `minisign -G -W`). `scripts/check-release-key.sh` must
+   secret `MINISIGN_SECRET_KEY` of the environment `release` (a passwordless key, `minisign -G -W`; an environment
+   secret with a required reviewer and `v*` tags only, not a repository secret: docs/release-key-rotation.md step 2,
+   ADR-380). `scripts/check-release-key.sh` must
    print `ok` with the release key and the former test key. The workflow **refuses to start** while `minisign.pub` is the
    placeholder or the former test key, or the secret is missing, and it checks after signing that the signature
    verifies with `minisign.pub`. The deployed builder page and the mirror must already know the release key (section 9,
@@ -88,14 +90,20 @@ git tag -a v0.6.0 -m "urMQTT v0.6.0"        # annotated, like v0.2.0 to v0.4.2; 
 git push origin main
 git push origin v0.6.0                       # this starts the Release workflow
 gh run watch --repo zeljan-alduk/urMQTT      # about the time of `make dist` on an arm64 runner
+# then approve the `sign` job (Actions, the run, "Review deployments", environment release)
 ```
 
-The workflow: checkout with full history, `scripts/check-release-key.sh` and a check that the signing secret exists
-(both before anything is built), `make dist ENV=release` (release kernels, universal ISO, raw image, template ISO, SBOM,
+The workflow has three jobs, so that the release key is never in a job that runs build code (ADR-380). **build**
+(no secret, read permissions only): checkout with full history, `scripts/check-release-tag.sh` (the tag is a release
+tag and its commit is on `main`) and `scripts/check-release-key.sh` (both before anything is built), `make dist ENV=release` (release kernels, universal ISO, raw image, template ISO, SBOM,
 `SHA256SUMS`), a check that every asset is there and in `SHA256SUMS`, that the `.iso` equals the template, that no dev
-asset and no PEM private key is among them (`scripts/check-no-pem-keys.py`), the minisign signature of `SHA256SUMS`
-(trusted comment `urMQTT vX.Y.Z release <commit>`) and its verification with `minisign.pub`, SBOM attestation, build
-provenance, and the GitHub release with generated notes. (v0.4.1 and earlier: `make dist ENV=dev`, comment `urMQTT
+asset and no PEM private key is among them (`scripts/check-no-pem-keys.py`), and the files as a workflow artifact.
+**sign** (environment `release`: your approval, the environment secret; it checks out `minisign.pub` only and builds
+nothing): the minisign signature of the build job's `SHA256SUMS` (trusted comment `urMQTT vX.Y.Z release <commit>`,
+the key on a pipe, never in a file) and its verification with `minisign.pub`. **publish** (contents, id-token and
+attestations write; builds and checks out nothing): SBOM attestation, build provenance, and the GitHub release with
+generated notes. The trusted comment names the tag, and the builder page, the mirror and `urmqtt-config check-release
+--keyring --tag` require it to be the tag they were given (ADR-381). (v0.4.1 and earlier: `make dist ENV=dev`, comment `urMQTT
 v0.4.1 dev <commit>`, the former test key.)
 
 If it fails, nothing is published except possibly a half-made release: see Rollback.
@@ -148,9 +156,13 @@ shasum -a 256 -c SHA256SUMS
 gh attestation verify urmqtt-dev-v0.4.1.elf --repo zeljan-alduk/urMQTT
 ```
 
-`urmqtt-config check-release --pubkey minisign.pub --pubkey keys/minisign-test-9229E05252D01F8E.pub --sums SHA256SUMS
-<files>` takes both keys and uses the one the signature names; it does not know the tag ranges (the page and the mirror
-enforce them: the test key is accepted for v0.1.0 to v0.4.1 only).
+`urmqtt-config check-release --keyring keys/release-keys.json --tag vX.Y.Z --sums SHA256SUMS <files>` checks a
+release by the key ring: the key the signature names must be in the ring and may sign that tag (the former test key
+v0.1.0 to v0.4.1 only, and for each of those tags only the published `SHA256SUMS`, pinned), and the signed trusted
+comment must name that tag (a signed file of one release is never accepted as another, ADR-365). The `--pubkey` form
+(`--pubkey minisign.pub --pubkey keys/minisign-test-9229E05252D01F8E.pub`) applies the same rules to every key of the
+ring built into the tool, with the tag the trusted comment names (ADR-366); prefer `--keyring` and `--tag`, which also
+say which release you expect.
 
 The template works without a toolchain (docs/DEPLOY.md section 1b):
 

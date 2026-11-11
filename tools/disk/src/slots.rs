@@ -84,6 +84,35 @@ pub fn verify_release(
     ))
 }
 
+/// The release signature checked against the key ring (`keys/release-keys.json`,
+/// `--keyring`): the tag is the one the signed trusted comment names, and the
+/// key must be allowed to sign that tag (its range and, for the former test
+/// key, the pinned `SHA256SUMS`), as the builder page and `urmqtt-config
+/// check-release --keyring` require. Without the ring every `--pubkey` key is
+/// accepted for every tag (security review of v0.6.0, SUPPLY-3, ADR-382).
+pub fn verify_release_ring(
+    name: &str,
+    image: &[u8],
+    sums: &[u8],
+    sig: &str,
+    ring: &[urmqtt_config_tool::keyring::RingKey],
+) -> Result<String, String> {
+    let (tag, v) = urmqtt_config_tool::keyring::verify_signed_tag(ring, sums, sig)?;
+    let digest = v.signed.sums.check(name, image)?;
+    Ok(format!(
+        "release signature ok: SHA256SUMS of {tag} signed by key {} ({}{}{}), {name} has SHA-256 {}",
+        v.signed.signature.key_id,
+        v.key.name,
+        if v.key.former_test_key {
+            ", the project's former test key"
+        } else {
+            ""
+        },
+        if v.pinned { ", pinned SHA256SUMS" } else { "" },
+        urmqtt_config_tool::release::hex(&digest)
+    ))
+}
+
 /// The configuration format of the ESP's configured slot, if it has one.
 pub fn config_format(esp: &[u8]) -> Option<u16> {
     let [off] = find_slots(esp, SlotKind::Boot)[..] else {
@@ -159,15 +188,34 @@ pub fn rules(
     db_schema: Option<u32>,
     allow_downgrade: bool,
 ) -> Result<Vec<String>, String> {
+    rules_for(
+        note,
+        &active.label,
+        u32::from(active.state.schema),
+        "the active slot's recorded schema",
+        db_schema,
+        allow_downgrade,
+    )
+}
+
+/// [`rules`] against a running kernel known by its label and store schema
+/// (`what_schema` says where that schema comes from, for the warning).
+pub fn rules_for(
+    note: &Note,
+    running: &str,
+    running_schema: u32,
+    what_schema: &str,
+    db_schema: Option<u32>,
+    allow_downgrade: bool,
+) -> Result<Vec<String>, String> {
     let mut warn = Vec::new();
     let store = match db_schema {
         Some(s) => s,
         None => {
             warn.push(format!(
-                "the store could not be read (encrypted without --key, or newer than this tool): judging by the active slot's recorded schema {}",
-                active.state.schema
+                "the store could not be read (encrypted without --key, or newer than this tool): judging by {what_schema} {running_schema}"
             ));
-            u32::from(active.state.schema)
+            running_schema
         }
     };
     if note.schema < store {
@@ -176,21 +224,21 @@ pub fn rules(
             note.schema
         ));
     }
-    match older(&note.version, &active.label) {
+    match older(&note.version, running) {
         Some(true) if !allow_downgrade => {
             return Err(format!(
                 "{} is older than the running {}: refused (rollback protection, AUDIT H8-W6); add --allow-downgrade if that is what you want",
-                note.version, active.label
+                note.version, running
             ));
         }
         Some(true) => warn.push(format!(
             "downgrade from {} to {} allowed by --allow-downgrade",
-            active.label, note.version
+            running, note.version
         )),
         Some(false) => {}
         None => warn.push(format!(
             "cannot compare {:?} with {:?} (not release versions): no downgrade check",
-            note.version, active.label
+            note.version, running
         )),
     }
     Ok(warn)

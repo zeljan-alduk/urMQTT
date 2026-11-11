@@ -199,6 +199,8 @@ check: certs ## fmt --check, typos, clippy -D warnings (host + bare metal), host
 	$(CARGO) test $(CARGO_FLAGS) --workspace
 	python3 -I scripts/test-mirror-releases.py
 	scripts/test-check-release-key.sh
+	python3 -I scripts/check-release-workflow.py
+	scripts/test-release-pipeline.sh
 	scripts/test-pki.sh
 	python3 -I scripts/test-caddy-apply.py
 	python3 -I deploy/demo-bridge/test_bridge.py

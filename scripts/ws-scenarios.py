@@ -645,8 +645,15 @@ def password_without_origin_header():
 
 
 def lockout():
+    # The wrong password of `password_refusals` a moment ago still counts (a
+    # success does not clear the failures, ADR-363): the third failure in the
+    # window locks, whichever attempt that is, and a connection after it gets
+    # no answer.
     for _ in range(3):
-        w = Ws(None, request())
+        try:
+            w = Ws(None, request(), timeout=3)
+        except (OSError, ssl.SSLError):
+            break
         w.send(frame(2, connect_pkt("p", user="web-1", password="wrong")))
         w.mqtt()
         w.close()

@@ -244,7 +244,7 @@ verified in the named milestone before it becomes Accepted).
 - **Handshake:** `rustls` 0.23 (`no_std`, no default features) through `UnbufferedServerConnection`. TLS 1.3 only, with suites TLS13_CHACHA20_POLY1305_SHA256 and TLS13_AES_128_GCM_SHA256, groups X25519 then secp256r1, and server and client signatures ECDSA P-256/SHA-256 (the dev and recommended production profile; other key types fail at build-time validation).
 - **Own crypto provider** (`crates/tls/src/provider`), built on RustCrypto: `aes-gcm`, `chacha20poly1305`, `p256` 0.14, `x25519-dalek`, `sha2`, `hmac`, `hkdf`. Randomness comes only from the kernel CSPRNG (ADR-025). Without it `start()` fails with `FailedToGetRandomBytes` and never falls back. ECDSA signing uses deterministic RFC 6979 nonces, so a signature does not depend on the RNG at signing time. P-256 ephemeral keys are rejection-sampled from CSPRNG bytes.
 - **Dependency hygiene:** `p256` 0.13 pulled `crypto-bigint` 0.5.5, which is affected by RUSTSEC-2026-0387 (secret-dependent branches in constant-time arithmetic). We moved to the `p256` 0.14 / `sha2` 0.11 / `hmac` 0.13 / `hkdf` 0.13 / `x509-cert` 0.3 / `der` 0.8 generation instead of ignoring the advisory, which also removed most duplicate crates. The remaining duplicates are `rand_core` 0.6 (needed by `x25519-dalek` 2 and `rand_chacha` 0.3) and `crypto-common`/`cpufeatures` (needed by `aes-gcm`/`chacha20poly1305` 0.10).
-- **Secret extraction:** rustls exposes the traffic secrets for kTLS-style offload only through `dangerous_into_kernel_connection()`, which hands over the *current* keys but no way to rekey from our side. We therefore capture the client and server application traffic secrets through a `KeyLog` keyed by the ClientHello random. After the handshake we convert to the kernel connection (to drain any post-handshake records rustls still owns, e.g. NewSessionTicket) and drop it at once.
+- **Secret extraction:** rustls exposes the traffic secrets for kTLS-style offload only through `dangerous_into_kernel_connection()`, which hands over the *current* keys but no way to rekey from our side. We therefore capture the client and server application traffic secrets through a `KeyLog` keyed by the ClientHello random. *(Superseded by ADR-340: one capture per session, no table keyed by the random.)* After the handshake we convert to the kernel connection (to drain any post-handshake records rustls still owns, e.g. NewSessionTicket) and drop it at once.
 - **Own record layer** (`record.rs`): TLS 1.3 records (RFC 8446 §5) with per-direction key, IV and 64-bit sequence numbers. It handles `KeyUpdate` in both directions (`update_requested` is answered), `close_notify`, inner content-type padding removal, the 2^14+256 ciphertext limit and the AES-GCM record limit (2^24 per key, then KeyUpdate). It is verified against RFC 8448 vectors and against a real rustls client (application data, KeyUpdate both ways).
 - **Client authentication:** a `WebPkiClientVerifier` rooted at the embedded CA, wrapped by a revocation check. `tls.revocation_list` names a file in `deploy/<env>/` with one hex serial per line; serials are normalised by stripping leading zeros so `00ab` matches `ab`. This build-time list is a bridge until the SQLite revocation table (M11). Expiry is checked against a wall clock: the firmware date at boot (Limine) plus uptime. Without a date at boot every handshake is refused (ADR-009).
 - **Identity:** the device id comes from the configured field. With `cn` it is the subject CN. With `san_uri` it is the rest of a `urn:urmqtt:device:` or `urn:urmqtt:service:` URI. The broker refuses a CONNECT whose client id differs from it (CONNACK 0x02, ADR-028), so the TLS layer authenticates and the broker authorises.
@@ -1782,7 +1782,7 @@ Entering and leaving the worker: 1.1 us per round trip. `test=db-bench` (5 000 i
   - **Filtering happens at the SYN, and costs no state.** `App::syn_ok` for the plaintext port asks, in this order: is the source in `allow_from` (or is `allow_from_anywhere` set), is it locked out, does it hold its maximum of connections, is the listener full, is there a login-rate token and is memory free. Any "no" is **no SYN-ACK**: the peer sees silence, as for a closed firewall, and the kernel keeps no connection, no timer and no table entry for it. The checks run again at the final ACK (state may have changed since the cookie was sent), and only then is the connection counted. A scan of the allowed networks therefore costs the broker one comparison per SYN.
   - **One table of source addresses for all cores** (`urmqtt-plain::Sources`, behind a spin lock): per address, its connections, its failures in the current window and its lock-out. It is a fixed set of 8-way buckets, hashed under a per-boot random key (the generator must be up or boot stops), sized at twice `max_connections`. An address is entered only when it opens a connection that passed the allow-list or fails a login, never for a SYN; a full bucket drops an idle slot, never one with a live connection or an active lock-out, and when none can be dropped the new connection is refused rather than left untracked. One table, not one per core, because a client's connections spread over the cores by the hash of their 4-tuple, and a lock-out that one core knew would be a lock-out in name only.
   - **Three login modes** (`urmqtt-plain::Authenticator`). *password* (the default): the MQTT user name picks an account, the password must match its PBKDF2 hash, the user name is the identity. Every refusal (no credentials, unknown user, wrong password) is the same CONNACK 4 and **exactly one hash is computed on every path** (a decoy hash with the dearest account's iteration count stands in for an unknown user, the comparison is constant time), so neither the answer nor the time says whether a user exists. *anonymous*: every client is `anonymous_identity`; credentials sent are ignored. *ip*: the longest matching network of `ip_identities` names the identity; a source in none gets CONNACK 5. The configuration check refuses an identity that is also an `acl.service_ids`, `acl.operator_ids` or `control.service_ids` entry, and an identity may only use `A-Z a-z 0-9 - _ . :` (no `$`, `/`, `+` or `#`), and the broker gives every plaintext session the plaintext role whatever its name is.
-  - **Lock-out.** A failed login (a CONNACK 4 or 5 from the checks above, an unreadable first packet, a first packet that is no CONNECT) counts against the **source address**; `max_failed_auths_per_ip` failures inside `lockout_s` lock the address out for `lockout_s`. A locked-out address gets no SYN-ACK (and the connections it already holds are not touched: they passed). A success clears the count. Failures are by address, not by user name, so a user name cannot be locked out by someone else, and a client behind one NAT shares its address's fate, which is the cost of the rule and is why the defaults (5 in 300 s) are generous for a legitimate typo.
+  - **Lock-out.** A failed login (a CONNACK 4 or 5 from the checks above, an unreadable first packet, a first packet that is no CONNECT) counts against the **source address**; `max_failed_auths_per_ip` failures inside `lockout_s` lock the address out for `lockout_s`. A locked-out address gets no SYN-ACK (and the connections it already holds are not touched: they passed; since ADR-363 a CONNECT on one of them is not judged while the lock-out runs). ~~A success clears the count.~~ A success does not clear the count (ADR-363: it let an account holder guess without end). Failures are by address, not by user name, so a user name cannot be locked out by someone else, and a client behind one NAT shares its address's fate, which is the cost of the rule and is why the defaults (5 in 300 s) are generous for a legitimate typo.
   - **A login costs CPU, so it is admitted at a rate.** Plaintext has its own `Admission` instance per core, not the TLS one: the TLS path is untouched. In password mode each new connection takes a token from a bucket whose rate is `0.5 s / (cost of one hash)` per core, measured at boot (`plaintext: one password check costs about N us`), at least 20 and at most the TLS handshake rate (**amended by ADR-267:** at least 1, so the half-core rule holds at any cost). The watchdog's handshake budget is calibrated with the dearer of a TLS handshake and a password check, and a plaintext connection that has not sent its CONNECT counts as handshaking for it.
   - **The identity is the user name, and it is the ACL's `{id}`.** A plaintext session's ACL name is its identity; the patterns are `plaintext.acl_publish` and `acl_subscribe` (`{id}` is replaced), not the device ACL. Several devices may share an identity (anonymous and ip modes always do).
   - **The session namespace is separate.** The session key is `$plain/<identity>/<client id>`. `$` cannot start a certificate identity or a client id the TLS side accepts, so a plaintext client cannot collide with, take over or be taken over by a TLS session. The client id itself is free text (Mosquitto's tools send `mosqpub/<pid>` or, for MQTT 3.1.1 without `-i`, nothing): a non-empty id is used as sent, an empty one with a clean session is named `auto-N` by the broker. Plaintext sessions are **clean only**: a CONNECT with `clean_session = 0` is answered CONNACK 5 (2 if the id is also empty), so there is no stored session to be read by the next client with the same name and no offline queue to fill.
@@ -5561,3 +5561,571 @@ device the kernel does not drive is unaffected; one for a driven device would be
      edition's slot that holds an `[ext]` key; an edition reconfigures its image by rebuilding it with its own
      packer and `mkiso.sh --config-slot`.
   5. **The private repository itself** (`urmqtt-enterprise`) is not created and nothing is published.
+
+## ADR-380 — The release key only in a signing job that builds nothing (security review of v0.6.0, SUPPLY-1)
+
+- **Status:** Accepted (v0.6.1).
+- **Context.** The Release workflow was one job: it ran `make dist` (about 26 third-party build scripts and proc
+  macros, `cargo run -p urmqtt-config-tool`, apt packages), then signed `SHA256SUMS` with the repository secret
+  `MINISIGN_SECRET_KEY`, written to `$RUNNER_TEMP/minisign.key`, and held contents, id-token and attestations write.
+  On a hosted runner every secret a job references is sent to the runner when the job starts, and the steps run as
+  one user with sudo, so code from any earlier step could read the key. Any `v*` tag, on any commit, started the
+  workflow from that commit. The key is passwordless: a leak signs every future release.
+- **Decision.** Three jobs. `build`: no secret, `contents: read` only; it first runs `scripts/check-release-tag.sh`
+  (a release tag whose commit is the workflow's and is on `origin/main`), then builds, checks and uploads the files.
+  `sign`: `environment: release` (a required reviewer and `v*` tags only, set in the repository settings; the key
+  is that environment's secret, not a repository secret), `contents: read` and `actions: read`; it checks out
+  `minisign.pub` alone (sparse), downloads the build's files with `gh run download`, signs `SHA256SUMS` with the key
+  on a pipe (`-s <(printf ...)`, never a file) and verifies with `minisign.pub`. `publish`: the attestations and
+  the GitHub release from the build's files and the signature; it checks out and builds nothing.
+  `scripts/check-release-workflow.py` (CI, "Release keys") refuses a workflow that references the key in more than
+  one job, signs outside the environment, writes the key to a file, builds, uses another action or holds a write
+  permission in the signing job, builds without the tag check or with a write permission, or checks out or builds
+  in a job with a write permission; `scripts/test-release-pipeline.sh` tests both checks (the old workflow fails
+  the shape check on 16 counts).
+- **Not done / limits.** The environment's protection rules and moving the secret are settings the owner makes once
+  (docs/release-key-rotation.md step 2); without them the workflow still signs, with a repository secret, but no
+  longer next to the build. A compromised build can still hand a wrong `SHA256SUMS` to the signing job (the reviewer
+  approves a run, not bytes); the build provenance attestation and `make repro` remain the check on what was built.
+  `actions/download-artifact` is not used because no reviewed pin of it was available offline; `gh` on the runner
+  image is used instead.
+
+## ADR-381 — The signed tag is the claimed tag (security review of v0.6.0, SUPPLY-2)
+
+- **Status:** Accepted (v0.6.1).
+- **Context.** The builder page, the mirror and `urmqtt-config check-release --keyring --tag` used the tag they were
+  given (from the mirror's unsigned `releases.json`, from GitHub, from the command line) for the key range and pins
+  only. A hostile mirror could list the correctly signed `SHA256SUMS` and template of v0.5.0 under v0.6.0; the page
+  verified it, labelled the build v0.6.0 and named the output after it.
+- **Decision.** The trusted comment the Release workflow signs is `urMQTT <tag> release <commit>` (before the key
+  rotation `urMQTT <tag> dev <commit>`; every signed release since v0.1.0 has this form). Its second word must be the
+  claimed tag, exactly: `commentTag` in `release.js`, `comment_tag` in `mirror-releases.py`, rule 5 of
+  `keyring::verify`. A file from the computer (no tag claimed) takes its tag from the signed comment, and the ranges
+  and pins apply to that tag (`keyring::verify_signed_tag`). Tests: `a_signed_older_release_under_a_newer_tag_is_refused`
+  (Rust), `release-binding.test.mjs` (the page with the real WebAssembly module),
+  `test_d_a_signed_older_release_under_a_newer_tag_is_not_published` (the mirror). A mirror test that signed with
+  the bare comment "renamed", which no release ever had, now signs with `urMQTT v0.2.0 renamed`.
+
+## ADR-382 — `slots stage --keyring` (security review of v0.6.0, SUPPLY-3)
+
+- **Status:** Accepted (v0.6.1).
+- **Decision.** `urmqtt-disk slots stage --image ... --keyring keys/release-keys.json` checks the release with the key
+  ring: the tag is the one the signed comment names, the key must cover it, the former test key only for its pinned
+  `SHA256SUMS` (`slots::verify_release_ring`, `keyring::verify_signed_tag`). docs/DEPLOY.md 8b uses it. `--pubkey`
+  alone still works (an operator without a clone), with a warning that no ranges and pins apply; `--keyring` and
+  `--pubkey` together are refused. Test: `stage_with_the_key_ring_refuses_the_former_test_key_for_a_new_tag`.
+
+## ADR-383 — Release links only to the release's GitHub pages (security review of v0.6.0, SUPPLY-4)
+
+- **Status:** Accepted (v0.6.1).
+- **Decision.** `loadReleases` keeps a release's `url` only when it is `https://github.com/<owner>/<repo>/releases/tag/<tag>`
+  for that release's tag, and `attestations` only when it is `https://github.com/<owner>/<repo>/attestations`, of the
+  list's `source` repository when it names one; anything else becomes `''` and is not shown as a link (as `source`
+  already was). Test: `release-binding.test.mjs`.
+
+## ADR-340 — One traffic-secret capture per TLS session, not a global table (v0.6.0 security review, R060-C1, R060-C2)
+
+- **Status:** Accepted (v0.6.1). No configuration format number and no store schema change.
+- **Context.** ADR-029 captures the two application traffic secrets (our record layer needs them for KeyUpdate)
+  through rustls's `KeyLog`, which is a field of the shared `ServerConfig` and is called with the ClientHello
+  random. The capture was a global table keyed by that random, bounded at 4096 slots, filled when the server sends
+  its flight (before any client certificate) and emptied only by a completed handshake or a rustls error. The
+  internal security review of v0.6.0 found two defects in it:
+  1. **R060-C1 (high).** A session dropped during the handshake (the kernel's `drop_conn` on a TCP close, reset or
+     handshake timeout) and the `NoIdentity` and resumed-but-revoked exits of `finish_handshake` freed nothing.
+     4096 ClientHellos from a peer without a certificate, each dropped after the server flight, left every slot
+     live; from then on every new handshake was put in slot 0, and any handshake that logged while another was
+     between its server flight and its client Finished evicted it ("traffic secrets not captured"). Broker-wide,
+     until reboot: in effect one handshake at a time. The secrets of abandoned handshakes also stayed in memory
+     unwiped. It failed closed (the captured secrets are compared with rustls's own keys), so no key confusion.
+  2. **R060-C2 (low).** The random was read from bytes 11..43 of the raw first record. RFC 8446 §5.1 lets a client
+     fragment the ClientHello; with fewer than 38 body bytes in the first record the bytes read were not the random,
+     the lookup missed and the handshake failed at its very end, after the client had authenticated.
+- **Decision.** Each session gets its own capture. `TlsServer::accept` makes a copy of the shared `ServerConfig`
+  (`ServerConfig::clone`: reference counts and empty vectors; 232 bytes on a 64-bit host) whose `key_log` is a new
+  `Arc<SecretCapture>` (76 bytes), and keeps a second reference in the handshake state. `finish_handshake` takes
+  the secrets from it (wiping it); a rustls error wipes it; and `Captured` wipes itself on drop, so every other
+  exit, including a session the kernel drops in the middle of a handshake, leaves nothing behind. There is no
+  table, no bound to evict from and no lookup by an attacker-chosen value. The ClientHello random is no longer
+  read at all: the first 6 bytes (a handshake record of version 3.x whose body starts with a ClientHello) decide
+  `NotTls`, which is earlier than the 43 bytes before; rustls reassembles a fragmented ClientHello.
+- **Alternatives.** (a) Keep the table and free the slot in a `Drop` of the handshake state and on every exit of
+  `finish_handshake`: closes the leak, but keeps a shared table that 4096 handshakes held open at once (within the
+  admission limits of a large deployment) still evict from, a lookup by a value the peer chooses (two sessions
+  with the same random share a slot), and R060-C2. (b) Keep rustls's `KernelConnection` and let it rekey: its
+  state is far larger than the 104-byte inline session of ADR-034. (c) A per-session `ServerConfig` built from
+  scratch: parses the key and certificates per connection. The copy costs nothing measurable:
+  `server_side_handshake_cost` (`ROUNDS=300`, release, Apple M4 Pro) gave a median of 235 and 236 µs with the
+  change and 237 and 239 µs without it. The heap of a handshake in flight grows by two small blocks (256 and 128
+  bytes in the buddy heap), freed when the handshake ends; an established session is unchanged
+  (`established_state_stays_small`).
+- **Not changed.** The role table (`ROLES`, ADR-049) is still global and bounded (`MAX_ROLES`, 4096): an entry is
+  written only after a chain verifies, so filling it needs a valid certificate, and an evicted or missing role is
+  not trusted (the chain is verified again at the end of the handshake), so it fails safe.
+- **Verified.** `crates/tls/tests/secret_capture.rs`: `abandoned_handshakes_do_not_break_later_overlapping_ones`
+  (4097 handshakes without a certificate dropped after the server flight, then three rounds of overlapping device
+  handshakes and a stranger's ClientHello inside a device's window: all established), `a_fragmented_client_hello_completes`
+  (splits at 1, 6, 20, 37, 38 and 100 body bytes), `not_a_client_hello_is_refused_after_six_bytes`. All three fail
+  on v0.6.0 and pass now. Unit tests `capture_tests` (taken once, wiped after a take or with one secret only,
+  different sessions with the same random keep their own secrets) replace the two tests of the removed table;
+  `the_bound_evicts_the_oldest_and_wipes_it` went with the bound it tested.
+
+## ADR-360 — A certificate identity is the subject's one CN, or the SAN's one identity URI (security review v0.6.0, AUTHZ-1)
+
+- **Status:** Accepted (security review of v0.6.0, lens authentication and authorisation).
+- **Problem.** `identity::common_name()` took the first CN that was a UTF8String or PrintableString and skipped CNs of
+  every other string type. `scripts/pki.sh sign-csr` read the first CN of any type (`openssl -nameopt multiline`) and
+  `openssl x509 -req` copied the CSR's whole subject. A CSR with CN#1 T61String `sensor_042` (OpenSSL's default string
+  mask picks T61String for a `_`) and CN#2 PrintableString `operator` was signed as device `sensor_042`, with the SAN
+  URI `urn:urmqtt:device:sensor_042`, and the broker authenticated it as `operator`: operator, control or service
+  rights, or another device's session and queue. `pki.sh check` was fooled the same way. Any enrollment service that
+  reads "the CN" with an ordinary X.509 library had the same gap.
+- **Decision.**
+  1. A subject with more than one CN, or with a CN that is neither a UTF8String nor a PrintableString, has **no
+     identity** (`identity()` returns `None`, the handshake ends with `NoIdentity`, as for a certificate without a CN).
+     A SAN with more than one `urn:urmqtt:` identity URI has none either (`identity_field = "san_uri"`). Two readers of
+     the same certificate can then no longer disagree about whom it names.
+  2. `pki.sh sign-csr` refuses a CSR whose subject has not exactly one CN, and builds the subject itself
+     (`-subj /O=<org>/CN=<id>`); the CSR contributes its public key and the CN's value only. Every leaf the script
+     signs (device, service, server) gets its subject that way.
+  3. `pki.sh check` fails a client certificate with more than one CN or more than one `urn:urmqtt:` SAN URI.
+  4. docs/PKI.md and docs/PROVISIONING.md state the rule for enrollment services and other CAs.
+- **Compatibility.** Certificates of `pki.sh` and `make certs` have one CN and one URI and keep their identities
+  (test `the_dev_certificates_keep_their_identities`). A certificate from another CA with two CNs stops working; it
+  was ambiguous.
+- **Verified.** Host tests `identity::tests::a_subject_with_two_cns_or_a_cn_of_another_string_type_has_no_identity`
+  (fixtures in `crates/tls/tests/data`, made with OpenSSL; before the fix the two-CN certificate gave `operator`) and
+  `the_dev_certificates_keep_their_identities`; `scripts/test-pki.sh` (sign-csr refuses the two-CN CSR and issues
+  nothing, a CSR with more subject fields is signed with the built subject, check refuses two CNs and two URIs).
+
+## ADR-361 — A full handshake checks the revocation list again at its Finished (security review v0.6.0, AUTHZ-8)
+
+- **Status:** Accepted (security review of v0.6.0).
+- **Problem.** The list was read when the client's Certificate was verified, and again in `finish_handshake` for
+  resumed sessions only (M16). A client may cut its second flight into several records and hold back the
+  CertificateVerify and Finished for up to the handshake timeout (10 s). A revocation applied in between did not stop
+  the handshake, and the cores' scan of live connections (at the control epoch change) had passed the connection
+  already, since it was not established then: the revoked device got an established connection and a session until
+  the next, unrelated, control change. This contradicted "a revoked device is refused at its next full handshake".
+- **Decision.** `client_identity()` checks `revoked.is_revoked(ee)` for every handshake (one binary search; the error
+  text of the resumed case is unchanged). Nothing more is needed in the kernel: `control::publish` replaces the shared
+  list before it bumps the epoch (Release, read with Acquire), so a core whose handshake still read the old list has not
+  yet seen the new epoch, and its scan, when it comes, finds the connection established and closes it.
+- **Verified.** `tls/tests/handshake.rs` `a_revocation_during_the_clients_flight_refuses_the_handshake`: a rustls
+  client with `max_fragment_size = 64` (the flight is 12 records), the serial revoked before each record in turn; no
+  split establishes the certificate (before the fix: "revoked before record 10 of 12: established").
+
+## ADR-362 — `disallow` reaches a connection before its CONNECT; a CONNECT deadline in the broker (security review v0.6.0, AUTHZ-9)
+
+- **Status:** Accepted (security review of v0.6.0).
+- **Problem.** The allowlist is checked at `Event::Established`; on a control change the cores close the identities
+  that left it through `Broker::disconnect_unless`, which walked sessions only. A connection that was authenticated
+  and handed to the broker but had not sent CONNECT has no session and was not closed. The transport's handshake
+  deadline ends at the hand-over and the broker timed only connections with a keep alive (which CONNECT sets), so such
+  a connection could wait for ever, holding its slot, and send its CONNECT after `disallow`; it was accepted.
+- **Decision.**
+  1. `disconnect_unless` also judges every connection that has a bound identity and no session yet, with the role its
+     CONNECT would get (the login's role, bootstrap, or the ACL's role of the identity).
+  2. `CONNECT_TIMEOUT_MS` (60 s): `tick` closes a connection that has no session that long after `open`. Input
+     before the CONNECT does not extend it (`last_rx_ms` moves only once there is a session; the CONNECT sets it, so
+     the keep alive still runs from the CONNECT). MQTT 3.1.1 §3.1.4 asks for such a deadline. The kernel's own paths
+     hand a connection over at its CONNECT (plaintext, dev port) or right before it (TLS, after the handshake;
+     WebSocket, after the upgrade), so a client that behaves sees no difference. A minute rather than the handshake's
+     10 s (which docs/SECURITY.md's limits table had claimed for "handshake and CONNECT"): the authorisation half of
+     the finding is closed by point 1, the deadline only bounds how long an authenticated client holds a slot, and a
+     web page may upgrade before its MQTT library connects (the smoke `wss-…-idle-connections-no-leak` holds
+     upgraded connections without CONNECT for about 11 s plus the time it takes to open them).
+- **Verified.** Broker tests `disallowing_an_identity_closes_its_connection_that_has_not_sent_connect` and
+  `a_connection_without_connect_is_closed_after_the_connect_timeout` (both failed before).
+
+## ADR-363 — A login no longer clears the failure count; a locked-out address is not judged (security review v0.6.0, AUTHZ-2)
+
+- **Status:** Accepted (security review of v0.6.0). Amends ADR-230 ("A success clears the count").
+- **Problem.** `Sources::succeeded()` reset the address's failure count, and the plaintext and WebSocket listeners
+  called it on every accepted password (before the clean-session and allowlist checks, so even a refused CONNECT
+  reset it). An account holder who logged in after every 4 wrong guesses at someone else's account was never locked
+  out (limit 5 in 300 s): guessing ran at the login admission rate. Separately, `decide()` never asked whether the
+  address was locked out, so each connection opened before the lock-out (up to `max_connections_per_ip`) still had one
+  guess judged.
+- **Decision.** Failures expire with their window only: `succeeded()` no longer touches the count (the listeners still
+  report successes there, so the rule lives in the table and is tested with it). Both `decide()` functions refuse a
+  CONNECT from an address that is locked out now (CONNACK 5, counted as `auth_failed`, no hash, no new failure). The
+  cost: a user who mistyped four times and then logged in has one more try inside the window, not five; the defaults
+  (5 in 300 s) still allow for typos.
+- **Verified.** `plain` host test `logins_between_failures_do_not_save_an_address_from_the_lockout` (before: 1200
+  guesses in 300 s from one address; now locked at the 5th). `it_matches_a_model`'s model no longer clears on a login.
+
+## ADR-364 — A withdrawn identity's Will is dropped; every password path costs the dearest count (security review v0.6.0, AUTHZ-4, AUTHZ-3)
+
+- **Status:** Accepted (security review of v0.6.0; two low findings fixed because the changes are small).
+- **The Will (AUTHZ-4).** The Will is checked against the ACL and the account class at CONNECT only, and `closed()`
+  published it, or armed it with its Will Delay Interval, whatever the close reason. A connection closed because its
+  certificate was revoked, its identity disallowed, or its run-time account removed or changed
+  (`CloseReason::Disallowed`, the only reason the kernel uses for these) therefore published a Will for rights it no
+  longer had, and a 5.0 device's delayed Will went out up to its delay after the revocation. `closed()` now drops the
+  Will of such a connection; every other close is unchanged. Not covered: a delayed Will already armed by an ordinary
+  close, whose identity is revoked while it waits (the session is offline; the Will goes out at its time, as before).
+  Tests `a_revoked_devices_delayed_will_is_dropped`, `a_narrowed_accounts_will_is_dropped_with_its_login`.
+- **The time of a refusal (AUTHZ-3).** An existing account's hash cost its own iterations, an unknown user the
+  decoy's (the dearest count). With accounts of mixed counts (allowed: `hash-password --iterations`, run-time
+  accounts, hashes from before ADR-267) a refusal's time said whether the user name exists. `password()` now spends
+  the difference on a throwaway derivation, so every path costs the dearest count; the admission rate and the watchdog
+  budget were sized for that count already (`max_iterations`). Test `a_cheaper_account_takes_as_long_as_an_unknown_user`
+  (1 000 against 40 000 iterations: 3.2 ms against 126.8 ms in a debug build before).
+
+## ADR-375 — A client that sends without reading has its input held, not an output buffer without bound (v0.6.0 security review, BROKER-1)
+
+- **Status:** Accepted (v0.6.1). Amends ADR-269 (a third reason to hold a connection's input) and ADR-223 (the
+  output bound now covers the broker's own answers).
+- **Context.** `max_outbound_bytes` (the kernel's 32 KiB, `TX_BUF`) bounded deliveries only. The packets the broker
+  answers itself (CONNACK, PINGRESP, PUBACK for a refused QoS 1 PUBLISH, PUBREL for a PUBREC, SUBACK, UNSUBACK) were
+  appended to the connection's output whatever its length, and its input was parsed however full that output was.
+  An authenticated client that kept sending PINGREQ and never read turned what it sent 1:1 into heap (6.5 MB of
+  PINGREQ, 6.5 MB of output; 13.6 MB of mixed answers, 10 MB). The TCP stack's persist timer probes a zero window
+  without end and nothing closed the connection, so one device could exhaust the heap; a failed allocation panics and
+  the panic handler stops the VM. Found by the v0.6.0 security review (BROKER-1, medium).
+- **Decision.**
+  1. Before each packet, `Broker::parse` checks the connection's own output. At or above `max_outbound_bytes` +
+     `limits.max_packet_size` + `OUT_SLACK` (4 KiB; 40 KiB with the defaults) it stops, marks the connection
+     `flow::OUT_FULL` and asks the transport to close its receive window (the ADR-269 event). Deliveries stop at
+     `max_outbound_bytes` plus one packet, so a client that reads (or whose TCP receive buffer takes the bytes) never
+     reaches the mark; only answers to a client that does not read do.
+  2. `Broker::consumed` ends the hold once the output is down to `max_outbound_bytes`: the held bytes drain in
+     slices from the next `poll_flow`, as after a pause, and the window opens when they are parsed. Nothing is
+     dropped: every held packet is answered once the client reads.
+  3. A connection held for its own output is not exempt from keep alive (a paused publisher is, ADR-269): it does
+     not read, and its keep alive ends it (1.5 times the interval). Bytes that still arrive are held up to
+     `HOLD_CONN` (2 MiB) plus a packet; beyond, the transport ignored the closed window and the connection is closed
+     (`CloseReason::Refused(0x97)`, DISCONNECT Quota exceeded on 5.0).
+  4. No cycle of holds can form through this rule: it waits for the client's own TCP, never for another
+     connection, and `single_full` never pauses a publisher for a recipient whose input is held.
+- **Rejected.** Closing the connection as soon as its output passes a bound: a client reconnecting to a 3.1.1
+  persistent session is resent its whole window at once (`resend_owed`), which can legitimately exceed any small
+  bound, and would be closed in a loop. Holding is back-pressure; it costs a client that reads nothing.
+- **Verified.** `a_client_that_never_reads_cannot_grow_its_output_without_bound` (the output stays under the mark,
+  the window is closed once, a transport that ignores it gets the connection closed at `HOLD_CONN`),
+  `a_held_reader_gets_every_answer_once_it_reads_again` (10 000 PINGREQ sent without reading: all 10 000 PINGRESP
+  arrive once it reads, the window opens again, the connection stays); the ADR-269 tests unchanged; `broker_input`
+  fuzzing.
+
+## ADR-376 — Device-scoped filters are counted and pruned at zero (v0.6.0 security review, BROKER-5)
+
+- **Status:** Accepted (v0.6.1). Completes H0-W1's "unsubscribing removes unused nodes" for the device-scoped trie.
+- **Context.** A filter in a device's own scope (`devices/<id>/...`, PROMPT §7.3) is interned relative to the scope
+  in `Broker::scoped`, which every device shares, so that devices cost no trie nodes of their own. That trie held no
+  subscriber lists, and UNSUBSCRIBE and the session's end pruned only the main trie: every scoped filter ever
+  subscribed stayed with its nodes and path. SUBSCRIBE + UNSUBSCRIBE of fresh filters (one subscription at a time,
+  no rate limit) grew the heap by about 4.5 KB a pair (20 000 pairs: 89 MB), invisible to
+  `$SYS/broker/topic_nodes`, until the allocation failed and the VM stopped. Found by the v0.6.0 security review
+  (BROKER-5, medium).
+- **Decision.** A node of a trie counts the subscriptions that use it without a subscriber entry
+  (`Topics::hold` / `Topics::release`, a `u32` in each node). `Broker::add_sub` holds a new scoped filter (an existing
+  one only changes its options), `remove_sub` and `remove_session` release it, and at zero (and no subscriber, child
+  or retained message) its nodes are pruned as `Topics::unsubscribe` prunes the main trie. A filter two devices share
+  stays while one of them holds it.
+- **Rejected.** Subscriber lists in the scoped trie: they would cost an entry per device in the shared node that
+  the design avoids (`devices/<id>/cmd/#` is held by every device). A limit on distinct scoped filters per shard:
+  bounds the growth but keeps the leak.
+- **Verified.** `scoped_filters_leave_no_nodes_behind` (300 fresh filters subscribed and unsubscribed leave the
+  node count where it was; a shared filter survives one device leaving and still delivers; a clean session's end
+  and a takeover of a persistent session free the last hold); `device_scoped_subscriptions_share_one_filter`
+  unchanged.
+
+## ADR-377 — The in-flight window fits the packet ids (v0.6.0 security review, BROKER-2)
+
+- **Status:** Accepted (v0.6.1).
+- **Context.** `limits.max_inflight_qos1` was only checked to be above 0, and a 3.1.1 session's window is that value
+  unchanged. `alloc_pid` loops until it finds a packet id not in flight; with a window of 65 535 or more and a
+  subscriber that never acknowledges, the next delivery after 65 535 flights never returned and the watchdog
+  stopped the VM. Needs an operator to configure such a window (BROKER-2, low).
+- **Decision.** The schema accepts `limits.max_inflight_qos1` in 1..=65 535 (the field table's range, so runtime
+  changes are checked the same way), and `Broker::new` clamps `max_inflight` to `MAX_INFLIGHT` (65 535). A flight
+  starts only below the window, so fewer than 65 535 ids are in flight and `alloc_pid` finds one within 65 535 steps.
+  The configuration format is unchanged; a value above 65 535, which could only hang the broker, is now refused.
+- **Verified.** `the_inflight_window_fits_the_packet_id_space` (broker), `inflight_window_fits_the_packet_ids`
+  (schema: 65 536 refused, 65 535 accepted).
+
+## ADR-365 — A signed release is bound to its tag by the signed trusted comment (security review v0.6.0, BOOT-1)
+
+- **Status:** Accepted (security review of v0.6.0, lens boot chain and updates; same root cause as SUPPLY-2).
+- **Problem.** `keyring::verify(keys, tag, sums, sig)` and the builder page's `verifyWithKeys` checked that the key
+  the signature names may sign the tag the caller gives (its range, its pins), then the signature. The tag came
+  from the caller (the mirror's `releases.json`, `--tag`) and was never compared with the release the signature
+  is about. A genuinely signed older release (v0.5.0) was accepted as v0.6.0 or v9.9.9: the page offered and named
+  an older, possibly vulnerable template as the newer release. A/B updates were not affected (`slots stage` judges
+  the kernel by its own build note).
+- **Decision.** The signed trusted comment names the release: the release workflow has signed every release since
+  v0.1.0 with `urMQTT <tag> dev|release <commit>`. Both checks now take the tag from the comment's second word and
+  refuse when it is not the tag being checked (a leading `v` aside). The comment is covered by minisign's global
+  signature, so the binding is as strong as the signature. File names in `SHA256SUMS` are not required to carry
+  the tag: the comment already binds the whole file, and the names of the releases signed by the former test key
+  are pinned by SHA-256 anyway.
+- **Verified.** `an_old_signed_release_is_refused_under_a_newer_tag` (`tools/config/tests/release_tag.rs`), the
+  real v0.1.0 file still verifying; builder test `a signed older release listed under a newer tag is refused`
+  (`key-rotation.test.mjs`, the fixture's `signedAs`). Both fail on v0.6.0.
+- **Not done.** `scripts/mirror-releases.py` still does not compare the comment with the tag; the mirror is not a
+  trust anchor (the page checks again), and that script is the supply-chain lens's (SUPPLY-2).
+
+## ADR-366 — `--pubkey` mode applies the built-in key ring (security review v0.6.0, BOOT-2)
+
+- **Status:** Accepted.
+- **Problem.** `release::verify_sums_any` (`urmqtt-config check-release --pubkey`, `urmqtt-disk slots stage
+  --pubkey`) picked the key by the id the signature names and applied no range and no pin. docs/RELEASE.md told
+  users to pass the former test key, which is considered compromised: a file signed with it was accepted for any
+  tag and any content (a forged v0.6.1 `SHA256SUMS`), while `--keyring` refused the same bytes.
+- **Decision.** The tool carries the repository's key ring (`keys/release-keys.json` with `minisign.pub` and the
+  test key, `keyring::builtin`). When the key that made the signature is in it, `verify_sums_any` also applies
+  `keyring::verify` with the tag the signed trusted comment names (`keyring::check_untagged`): the former test key
+  signs only its six pinned files, the release key only tags from v0.4.2. A key that is not in the ring (an
+  operator's own release key) is not restricted. A ring that does not parse (a fork with the placeholder key) makes
+  the check fail closed. RELEASE.md section 9 now shows `--keyring` with `--tag`.
+- **Verified.** `the_former_test_key_is_held_to_the_ring_in_pubkey_mode`, `the_built_in_ring_is_the_repository_ring`
+  (`release_tag.rs`); the existing `verify_sums_any` tests with the real v0.1.0 file pass unchanged.
+
+## ADR-367 — The configuration format rule reads the kernels' build note (security review v0.6.0, BOOT-5, BOOT-6)
+
+- **Status:** Accepted.
+- **Problem.** `configure_iso_in_place` took what the kernel reads from the template's slot only while it was empty;
+  once configured, the limit became this tool's own `FORMAT_VERSION`, so an old template configured twice took a
+  format its kernel refuses at boot. `configure_raw` (`pack --image`) had no format rule at all. Both contradict
+  ADR-233 ("an image that an older kernel would refuse is never offered"). Effect: the broker does not start (fail
+  closed); operator position.
+- **Decision.** One rule, `image::kernel_reads`, for both: the configuration format in the kernels' build note
+  (v0.6.0 and later, the lowest if they differ; decoded by the rules of `urmqtt_store::slots::parse_note`), else the
+  format of an unconfigured slot (the ISO's installation image keeps its `DISK` slot empty), else the format of the
+  configuration already in the image (the most it is known to take; the error says to configure the template of
+  that release instead). Never the tool's own format. Configuration format and store schema numbers are unchanged.
+- **Verified.** `reconfiguring_a_configured_old_template_keeps_the_format_rule` (`tools/config/tests/cli.rs`),
+  `a_raw_image_is_not_configured_with_a_format_its_kernel_cannot_read` (`release_tag.rs`),
+  `the_config_tool_reads_the_build_note_like_the_store` (`tools/disk/tests/slots.rs`).
+
+## ADR-368 — `update-boot` applies the rules of `slots stage` (security review v0.6.0, BOOT-3)
+
+- **Status:** Accepted.
+- **Problem.** `urmqtt-disk update-boot --in-place` on an A/B disk wrote the ESP over the running slot without the
+  build note, the downgrade rule, the store schema rule or the configuration format rule, then resealed the slot as
+  a confirmed way back recording the older kernel. SECURITY.md said a kernel older than the store's schema is
+  refused "always".
+- **Decision.** `update_boot` reads the new ESP's build note. On an A/B disk a note is required (`ab::note_of`), and
+  `ab::rules` applies against the active slot (`--allow-downgrade` exists for update-boot too). On a disk with one
+  slot, a new kernel with a note is held to the format rule, the store schema rule and, when the running kernel has
+  a note, the downgrade rule (`ab::rules_for`); a kernel without a note (before v0.6.0) is judged by nothing, as
+  before (no note, no facts). Every refusal comes before the first write.
+- **Verified.** `an_in_place_update_keeps_the_downgrade_rules` (`tools/disk/tests/slots.rs`): the v0.5.9 ESP of
+  format 13 refused with the words of `slots stage`, an older store schema refused even with `--allow-downgrade`, an
+  older release refused without it and accepted with it, a note-less kernel refused; the disk unchanged by every
+  refusal.
+
+## ADR-345 — Device addresses: the MSI-X table inside its BAR, no device mapping over RAM (security review of v0.6.0)
+
+- **Status:** Accepted (v0.6.1; security review of v0.6.0, memory safety lens, finding UNSAFE-1, medium).
+- **Context.** `setup_msix_queues` mapped `BAR base + table_offset` for `table_size * 16` bytes as device memory
+  and wrote MSI-X entries there (entry 0 for every MSI-X device; entries 1.. for the NIC, at probe and again in
+  `route_net_queue`). Offset (up to 0xFFFF_FFF8) and size (up to 2048 entries) are the device's MSI-X capability,
+  and nothing checked them against the BAR, unlike the virtio structures (`region` checks offset + length against
+  the probed BAR size). `memory::map_mmio` mapped any physical address. On QEMU q35 and aarch64 `virt` the kernel's
+  RAM lies within 4 GiB above the 32-bit BAR window, so a hostile device (bare metal, or a device model less
+  trusted than the hypervisor) could have the kernel overwrite RAM with MSI address/data words: memory corruption
+  by the CPU, which the IOMMU of `devices.iommu = "require"` does not see. The values are the kernel's, so it is a
+  crash or damaged state, not a chosen write.
+- **Decision.** `pci::msix_table` returns the table's physical range only when its BAR is an assigned memory BAR
+  and `table_offset + table_size * 16 <= bar_size` (probed, with overflow checked); otherwise the device gets no
+  MSI-X (`Why::TableUnmapped`, the boot line says so) and is polled, as with any other MSI-X setup failure. As a
+  second line, `memory::map_mmio` refuses any range that overlaps a RAM-like entry of the memory map (usable,
+  bootloader-reclaimable, kernel and modules, ACPI-reclaimable), which also covers a BAR base the device or
+  firmware set inside RAM, for every caller (virtio structures, an edition's BAR, the interrupt controllers, the
+  IOMMU registers, the HPET); length overflow is refused too.
+- **Not changed.** The MSI-X pending-bit array is still not mapped (the kernel never reads it).
+- **Verified.** Host test `pci` `msix_table_outside_its_bar_is_refused` (valid tables accepted, an offset past
+  the BAR, the largest offset, a table running off the end, the largest table in a small BAR, an unassigned BAR and
+  an I/O BAR refused; BARs and the command register restored). QEMU smoke runs (below in the release notes) boot
+  with MSI-X on virtio-net, virtio-blk and the IOMMU groups unchanged.
+
+## ADR-346 — `limits.max_topic_levels` is capped at 128 (security review of v0.6.0)
+
+- **Status:** Accepted (v0.6.1; security review of v0.6.0, memory safety lens, finding UNSAFE-2, low).
+- **Context.** The topic tree's walks (`collect` under `subscribers`, `walk_retained`, `all_below`) recurse once
+  per topic level, and the literal-child call is not a tail call. `limits.max_topic_levels` accepted 1..=u32::MAX
+  (README said at most 65 535) and the kernel converted it with `as u16`, so 65 536 became 0 (every topic refused)
+  and 65 537 became 1. With it and `limits.max_topic_len` raised, one device could publish a retained message (or
+  subscribe) some 800+ levels deep and overflow a data core's 128 KiB stack: the guard page makes that a fatal
+  fault, which stops the broker. The default (16) was never at risk.
+- **Decision.** The binary configuration field and `urmqtt-config-schema` accept 1..=128 (`MAX_TOPIC_LEVELS` in
+  both, a test keeps them equal). The kernel converts every `u32` limit it hands the MQTT codec as `u16` with
+  saturation (`limit16`), not truncation; this also fixes `max_subscriptions_per_session` above 65 535 becoming a
+  `max_topics_per_packet` of 0. The configuration format number is unchanged: a blob or TOML with a value above
+  128 is now refused at validation, as any out-of-range value is. The walks stay recursive: at 128 levels they use
+  a small, fixed part of the stack.
+- **Verified.** Host tests `cfg` `topic_levels_are_capped`, `config-schema` `topic_levels_are_capped` (129, 1000,
+  65 536 and u32::MAX refused, 128 accepted, both caps equal) and `broker` `topic_depth_stack`
+  (`deepest_allowed_topic_fits_a_data_core_stack`: subscribers, a literal, `#`, `a/#` and an all-`+` retained walk
+  at 128 levels on a 128 KiB thread in the unoptimised build; the same test at 4 000 levels overflows).
+
+## ADR-347 — The IOMMU drivers reach only the frames lent to them (security review of v0.6.0)
+
+- **Status:** Accepted (v0.6.1; security review of v0.6.0, memory safety lens, finding UNSAFE-3, low, hardening).
+- **Context.** `urmqtt-iommu` has no `unsafe`: it reads and writes its tables through `Env::read`/`Env::write` by
+  physical address, and the kernel's `KEnv::va` turned any 8-byte-aligned address into an HHDM pointer. The `Env`
+  contract (only memory from `Env::alloc`) was documentation; nothing enforced it, so a logic bug in the safe crate
+  would have been an arbitrary kernel write. No such bug was found (ring indices masked, IDs checked against table
+  sizes, walks follow only entries the kernel wrote), and no attacker reaches the path.
+- **Decision.** Each unit's `KEnv` records the frames its `alloc` handed out (`OwnedFrames`: disjoint sorted
+  ranges, binary search) and `va` refuses a doubleword outside them: a read gives 0, a write is dropped, as for a
+  misaligned address. A frame the bookkeeping cannot record is not handed out. `flush` (a cache clean, no write)
+  is unchanged.
+- **Verified.** Host test `kernel` `owned_frames::tests::only_lent_frames_are_reachable`; the `iommu` smoke group,
+  where every table of VT-d, AMD-Vi and SMMUv3 goes through `KEnv`.
+
+## ADR-370 — A torn superblock write of the format is an interrupted format, formatted again (v0.6.0 security review, R060-S1)
+
+- **Status:** Accepted (v0.6.1). No layout version, no configuration format number and no store schema change:
+  the bytes a format writes are the same as in v0.6.0.
+- **Context.** A format writes size-table slot A (`seq` 0, all sizes 0), size-table slot B (zeros), flushes, then
+  writes superblock slot A in one 4 KiB write and flushes (DISK-FORMAT §6). On a device with 512-byte logical
+  sectors (virtio-blk's default) that write is not atomic, and the project's own fault model tears writes. Torn
+  after 1 to 7 sectors it left slot A with the magic and a bad CRC and slot B zero: `Layout::select` returned
+  `BadChecksum`, the partition was neither blank nor valid, and with `refuse_on_corruption` the kernel refused to
+  serve at every boot, with no tool to reformat it. The existing cut test of the sealed format stopped writes, it
+  never tore one.
+- **Decision.** `Disk::open*`, `probe` and `unlock` read the superblocks through `select_slots`, which takes
+  exactly the state of a torn format superblock for blank, so the format runs again (for the console passphrase:
+  the first-boot prompt again). All of these must hold: slot A starts with the magic and fails its CRC; slot A's
+  last sector, the one holding the CRC, is all zero (the write never completed, so the format never returned a
+  disk anything was written to: a completed superblock's CRC is in that sector, and no write, release or scrub
+  zeroes part of a superblock); slot B is all zero (no later superblock update, which always goes to the slot not
+  in force); size-table slot B does not decode (zeros, or on an encrypted disk the cipher's zeros: no size commit
+  since the format, the first goes to slot B); and size-table slot A, when it decodes (a plain disk), is the
+  format's own. Any other damage is still refused.
+- **Alternatives.** (a) Zero size-table slot B on the raw device even on an encrypted disk, to make "no commit"
+  readable without the key: changes the bytes of every new encrypted disk (`golden_v21` froze them), and is not
+  needed once the last sector is checked. (b) Treat any `BadChecksum` with slot B zero as blank: a formatted disk
+  whose superblock was never rewritten (most disks) would be formatted over after one flipped bit, losing data.
+  (c) A tool command to force a format: needs the operator and an offline step on a VM that did nothing wrong.
+- **Verified.** `crates/store/tests/wrapped.rs`: `a_torn_superblock_write_during_the_format_is_formatted_again`
+  (plain and sealed formats, the superblock write torn after 1 to 7 sectors: probed blank, formatted again, data
+  written and read back; fails on v0.6.0), `a_damaged_superblock_of_a_used_disk_is_still_refused` (a flipped bit,
+  and the last sector zeroed by hand on a disk with a committed size, plain and sealed: still `BadChecksum`).
+
+## ADR-371 — The plaintext files of `urmqtt-disk` are owner-only (v0.6.0 security review, R060-S2)
+
+- **Status:** Accepted (v0.6.1). No format change.
+- **Context.** `--key-out` was already written with mode 0600 and `create_new`. Three other outputs of the tool hold
+  the plaintext of an encrypted disk but were written at the umask's mode (0644 by default): the conversion
+  journal of `encrypt` (`DISK.convert-journal`, the plaintext of the 1 MiB chunk being rewritten, left on disk by
+  an interrupted run until `--resume`), and the files of `export-db` and `backup-extract` (the whole database:
+  account PBKDF2 hashes, revocations, retained and queued messages).
+- **Decision.** The journal's temporary file is removed if a stale one is there, created with `create_new` and mode
+  0600, synced and renamed. `export-db` and `backup-extract` write through `write_private`: mode 0600 on creation,
+  and set to 0600 before a byte is written when the file already existed; then synced. They still replace an
+  existing file (unlike `--key-out`), as they did.
+- **Verified.** `tools/disk/tests/convert.rs::the_conversion_journal_file_is_owner_only` (over a stale 0644
+  temporary file), `tools/disk/tests/keys.rs::plaintext_copies_of_an_encrypted_disk_are_owner_only` (over an
+  existing 0644 file, and a new one); both fail on v0.6.0.
+
+## ADR-372 — A passphrase change is a rotation, not a cure for a leak (v0.6.0 security review, R060-S3)
+
+- **Status:** Accepted (v0.6.1). Documentation and messages only.
+- **Context.** The console's `change` and `urmqtt-disk keys change` rewrap the same disk key under the new
+  passphrase (ADR-327). Whoever copied the superblock earlier (a provider snapshot, a backup of the image) and
+  learns the old passphrase unwraps the key from the copy, and it decrypts the current disk and everything written
+  later, until a full `rekey`. The kernel logged "the old one no longer opens the disk", and no document said
+  that a leaked passphrase needs a rekey.
+- **Decision.** Kept as designed: rotating the key is a full rewrite, offline (ADR-327 point 4), and a change that
+  rewrote the disk would make every rotation an outage. The log line (its prefix, which the smoke test checks, is
+  unchanged) and the tool's message now say that the disk key is the same and that a leaked passphrase needs
+  `urmqtt-disk rekey` then `keys add`; SECURITY.md ("A disk key that is not in the image"), DEPLOY.md and
+  OPERATE.md say it too.
+
+## ADR-373 — What a disk key in the image protects on a single-disk VPS (v0.6.0 security review, R060-S7)
+
+- **Status:** Accepted (v0.6.1). Documentation only.
+- **Context.** With `disk_key_source = "image"` the 64 key bytes are in the configuration blob, and the installer
+  writes the configuration slot to `/boot/urmqtt.cfg` on the ESP of the disk whose data partition it encrypts
+  (DISK-FORMAT §0). A snapshot or copy of a single-disk VPS volume therefore holds the key next to the ciphertext.
+  KNOWN-ISSUES section 1 said so; SECURITY.md ("It protects a stolen volume, snapshot or disk image") and DEPLOY.md
+  ("the cloud provider's snapshot, a copy of the disk image") promised the opposite.
+- **Decision.** Both now say what the image-key mode protects: a data partition taken without the boot partition
+  next to it (a copy of that partition alone, released or reused blocks of the provider's storage), not a snapshot
+  of the whole disk; against snapshots they point to `disk_key_source = "console"`. Moving the key off the boot
+  disk (a second volume for the data) is a deployment choice the documents can describe once it is tested.
+
+## ADR-374 — The cost of an offline guess at a disk passphrase: warned about, not raised yet (v0.6.0 security review, R060-S4)
+
+- **Status:** Accepted (v0.6.1). No format change.
+- **Context.** Each guess at a copied header costs one PBKDF2-HMAC-SHA-256, which is not memory-hard. The default is
+  300 000 iterations (OWASP asks 600 000 for PBKDF2-HMAC-SHA-256), a slot may name 10 000, and the passphrase rule
+  is 12 printable characters, which `Password1234` meets. One guess at 10 000 iterations took 0.59 ms on one core
+  of the review's host, so about 18 ms at the default.
+- **Decision.** For this release: `urmqtt-disk keys` warns when a new slot is below the default cost or its
+  passphrase is shorter than 20 characters (the length DEPLOY.md asks for), and KNOWN-ISSUES section 5 lists the
+  limit. Not done: raising the default doubles every boot's unlock (and the TCG smoke runs), raising the floor
+  would refuse existing slots, and a memory-hard slot kind (Argon2id) is a new slot kind in the format. They are
+  future work.
+- **Verified.** `tools/disk/tests/keys.rs::a_weak_new_slot_is_warned_about`.
+
+## ADR-355 — A close the broker starts has a deadline; a closed TCP connection behind a shut window is given up (NETDOS-1, NETDOS-2)
+
+- **Status:** Accepted (v0.6.1 security review).
+- **Problem.** A close relied on the peer to finish it. The broker queues its last bytes (a TLS alert, a
+  CONNACK refusal, a WebSocket close frame, a metrics answer) and TCP sends the FIN after them. A peer that
+  completed the handshake with a final ACK of window 0, carrying bytes that are no ClientHello, made the TLS
+  server refuse and close at once; the alert and the FIN then waited behind the shut window. TCP armed its
+  persist timer, which re-armed itself for ever without counting toward `MAX_RETRIES`; the service's handshake
+  deadline skips closing connections, and there is no TCP keepalive (ADR-033 leaves liveness to MQTT, and no
+  session existed). Nothing ever called `closed`, so the TCP slot, the service's `Conn`, the per-address counts
+  and about 500 bytes of heap per connection stayed until reboot, with one probe a minute each. In QEMU 52 268
+  such connections brought the heap to `memory.min_free_mb` and every new connection was refused (high: one
+  unauthenticated peer, about three small segments per connection). The same held for every other close the
+  broker starts: plaintext and WebSocket refusals, keepalive expiry, protocol errors (NETDOS-2, medium). With
+  an open window and a silent peer, the retransmission bound still held a closed connection about 243 s.
+- **Decision.**
+  1. **Service (all listeners):** `push_to_tcp`, the one place every close passes (each path that sets
+     `closing` lists the connection in `blocked`), gives a closing connection a deadline of
+     `CLOSE_LINGER_MS` = 5 s in `urmqtt_net::linger::Linger` (a FIFO of (time, connection, `tconn`)). A
+     connection still open with the same `tconn` at its deadline is detached, dropped (`drop_conn`, so the
+     per-address and listener counts are given back) and reset (RST), counted in the log at powers of two
+     (`tcp: N close(s) not finished within 5000 ms reset on core C`). A close that finishes normally leaves
+     its entry to be dropped when it reaches the front. The flag that says the deadline is set shares a byte
+     with `fin_sent` (`close_step`): `Conn` stays within its 152-byte budget (ADR-034).
+  2. **TCP:** once the application has closed (`FIN_QUEUED`), each persist probe counts like a
+     retransmission timeout and the connection is given up after `MAX_RETRIES` with `closed(Timeout)`. A probe
+     the peer takes moves `snd_una` and starts the count again; an open connection still waits for its window as
+     long as it takes (a reader that is merely slow is not cut). This is the bound for users of the TCP crate
+     other than the service (the outbound log link), and a second line behind the deadline.
+- **Why 5 s.** A close has at most 32 KiB of output behind it (`TX_BUF`) plus the FIN: seconds on any link a
+  device uses. The handshake deadline is 10 s (3 s under pressure); a close is cheaper to cut than a handshake,
+  since the session is already over and a reset loses only bytes the peer did not take. Under the attack the
+  held connections are the closes of the last 5 s, not every one since boot.
+- **Verified.** Host tests `zero_window_after_close_is_given_up`, `zero_window_after_close_with_answered_probes_is_given_up`
+  (both fail before the change), `zero_window_without_close_keeps_probing`, `zero_window_is_probed_then_resumes`
+  (unchanged) in `tcp`; `linger::tests` in `net` (`closes_that_never_finish_are_bounded_by_the_deadline`: 2 000
+  zero-window closes a second hold at most 5.1 s of them). Smoke `attack-zero-window-close` in the `attack_raw`
+  group: `urmqtt-attack zero-window-close` completes 2 000 handshakes with a zero-window ACK carrying non-TLS
+  bytes, and every one comes back as a RST, with the broker's reset count in the serial log.
+
+## ADR-350 — KeyUpdate answers: one per silent period (PARSERS-1, v0.6.1)
+
+- **Status:** Accepted (security review of v0.6.0, lens "parsers of untrusted bytes"). No configuration format
+  number and no store schema change.
+- **Context.** `RecordLayer::open` answered every post-handshake KeyUpdate with `update_requested` by sealing a
+  27-byte KeyUpdate(update_not_requested) into the caller's output, unconditionally. In the kernel that output is
+  the connection's `pending`, and the 32 KiB bound (`TX_BUF`) is only applied where broker output and WebSocket
+  frames are moved into TLS, never to what the TLS session writes while decrypting input. The receive window does
+  not depend on `pending`, so an authenticated device that advertised a zero window and kept sending 27-byte
+  KeyUpdate records got one 27-byte answer queued per record (about 13 MB/s per core on a host build) until the
+  heap ran out and the allocation failure stopped the whole broker. It contradicted SECURITY.md's "Output buffered
+  per connection: 32 KiB". The attacker needs a valid client certificate (mTLS completes before any KeyUpdate).
+- **Decision.** The record layer remembers that the last record it sealed is such an answer (`answered`, one
+  byte in padding: `TlsSession` does not grow). While it is, a further `update_requested` is applied to the
+  receive keys as before but queues no answer: RFC 8446 §4.6.3 says an implementation that receives several
+  KeyUpdates while it is silent responds with a single update, and that one answer covers them all. Any other
+  record we seal (application data, alerts, our own KeyUpdate) clears the flag, so the next request is answered
+  again. A peer interleaving requests with data that makes us reply can only get answers interleaved with that
+  reply, which already stops at `TX_BUF`. Coalescing was chosen over pausing decryption on a full `pending` or a
+  hard cap that closes the connection: it fixes the cause in the place that creates the bytes, needs no kernel
+  state and keeps a legitimate peer's KeyUpdate working.
+- **Verification.** Unit test `record::tests::key_update_requests_while_silent_get_one_answer` (both suites:
+  1000 requests, one 27-byte answer, keys in step, the next request after data answered again); interop test
+  `handshake::many_key_update_requests_while_silent_queue_one_answer` (a stock rustls 0.23 client with the dev
+  device certificate sends 2000 requests: 27 bytes queued instead of 54 000, data flows both ways afterwards);
+  both fail on v0.6.0. Fuzz targets `tls_record` and `diff_tls_record` re-run.

@@ -29,6 +29,7 @@ pub mod dhcp;
 pub mod iface;
 pub mod ipv4;
 pub mod ipv6;
+pub mod linger;
 pub mod nd;
 pub mod rss;
 pub mod source_limit;

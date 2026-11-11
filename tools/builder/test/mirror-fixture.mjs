@@ -37,7 +37,8 @@ const sha256 = buf => createHash('sha256').update(buf).digest('hex');
  * Writes a mirror directory. `releases`: [{tag, prerelease, template: Buffer|{path},
  * published}], newest first; a release with `template: null` has none (greyed).
  * `tamper`: tags whose ISO is altered after signing (to test the checks).
- * A release's `signer` (a key from newKey) signs it instead of `key` (key rotation).
+ * A release's `signer` (a key from newKey) signs it instead of `key` (key rotation); `signedAs` puts another
+ * tag in the signed trusted comment (an older release listed under a newer tag).
  */
 export function writeMirror(dir, key, releases, { tamper = [] } = {}) {
   mkdirSync(dir, { recursive: true });
@@ -60,7 +61,7 @@ export function writeMirror(dir, key, releases, { tamper = [] } = {}) {
       const size = content.length;
       const sums = `${digest}  ${file}\n`;
       writeFileSync(join(tdir, 'SHA256SUMS'), sums);
-      writeFileSync(join(tdir, 'SHA256SUMS.minisig'), minisignSignature(r.signer || key, Buffer.from(sums), `urMQTT ${r.tag} test fixture`));
+      writeFileSync(join(tdir, 'SHA256SUMS.minisig'), minisignSignature(r.signer || key, Buffer.from(sums), `urMQTT ${r.signedAs || r.tag} test fixture`));
       const target = join(tdir, file);
       if (bytes) {
         const served = tamper.includes(r.tag) ? Buffer.from(bytes) : bytes;

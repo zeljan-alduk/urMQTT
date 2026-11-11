@@ -254,6 +254,13 @@ pub struct RecordLayer {
     suite: Suite,
     rx: Direction,
     tx: Direction,
+    /// The last record we sealed is a KeyUpdate answer to the peer's
+    /// update_requested. While it is, a further request is covered by that
+    /// answer and gets none of its own (RFC 8446 §4.6.3: an implementation
+    /// that receives several KeyUpdates while it is silent responds with a
+    /// single update). Without this a peer that never reads could make us
+    /// queue 27 bytes per 27-byte record it sends, with no bound (ADR-350).
+    answered: bool,
 }
 
 /// Total length (header + body) of the record at the start of `buf`, if
@@ -275,6 +282,7 @@ impl RecordLayer {
             suite,
             rx: Direction::new(rx_secret, rx_seq),
             tx: Direction::new(tx_secret, tx_seq),
+            answered: false,
         })
     }
 
@@ -339,12 +347,16 @@ impl RecordLayer {
             // record (fragmented post-handshake messages are not accepted).
             CT_HANDSHAKE => match content {
                 [HS_KEY_UPDATE, 0, 0, 1, req @ (0 | 1)] => {
-                    let respond = *req == 1;
+                    // One answer covers every request received since we last
+                    // sent anything (ADR-350): `respond` says whether this
+                    // record queued one.
+                    let respond = *req == 1 && !self.answered;
                     if !self.rx.update() {
                         return Err(RecordError::BadRecord);
                     }
                     if respond {
                         self.send_key_update(out)?;
+                        self.answered = true;
                     }
                     Ok(Opened::KeyUpdated { respond })
                 }
@@ -378,6 +390,8 @@ impl RecordLayer {
         out.extend_from_slice(&header);
         out.extend_from_slice(&buf);
         buf.zeroize();
+        // We are no longer silent: the next request needs its own answer.
+        self.answered = false;
         Ok(())
     }
 
@@ -425,7 +439,11 @@ impl RecordLayer {
 
     /// Initiates a key update of our sending keys (tests, long sessions).
     pub fn update_tx(&mut self, out: &mut Vec<u8>) -> Result<(), RecordError> {
-        self.send_key_update(out)
+        self.send_key_update(out)?;
+        // A KeyUpdate of ours that was not an answer: a later request from
+        // the peer still needs one.
+        self.answered = false;
+        Ok(())
     }
 }
 
@@ -542,6 +560,56 @@ mod tests {
         // Traffic still flows both ways with the new generation.
         assert_eq!(deliver(&mut s, &mut c, b"after"), b"after");
         assert_eq!(deliver(&mut c, &mut s, b"back"), b"back");
+    }
+
+    /// PARSERS-1 (ADR-350): a peer that sends KeyUpdate(update_requested)
+    /// records and never reads used to get one 27-byte answer queued per
+    /// record, without bound. While we are silent, one answer now covers
+    /// all of them (RFC 8446 §4.6.3); once we send again, the next request
+    /// is answered again. Keys stay in step on both sides throughout.
+    #[test]
+    fn key_update_requests_while_silent_get_one_answer() {
+        for suite in [Suite::Aes128Gcm, Suite::ChaCha20Poly1305] {
+            let (mut s, mut c) = pair(suite);
+            const N: usize = 1000;
+            let mut reply = Vec::new();
+            let mut answered = 0;
+            for _ in 0..N {
+                let mut wire = Vec::new();
+                c.seal(CT_HANDSHAKE, &[HS_KEY_UPDATE, 0, 0, 1, 1], &mut wire)
+                    .unwrap();
+                assert!(c.tx.update());
+                match s.open(&mut wire, &mut reply).unwrap() {
+                    Opened::KeyUpdated { respond: true } => answered += 1,
+                    Opened::KeyUpdated { respond: false } => {}
+                    o => panic!("{o:?}"),
+                }
+            }
+            assert_eq!(answered, 1, "{suite:?}");
+            assert_eq!(reply.len(), HEADER + 5 + 1 + TAG, "{suite:?}: one answer");
+            // The client applies the single answer; traffic flows both ways.
+            assert_eq!(
+                c.open(&mut reply, &mut Vec::new()).unwrap(),
+                Opened::KeyUpdated { respond: false }
+            );
+            assert_eq!(deliver(&mut s, &mut c, b"after"), b"after");
+            assert_eq!(deliver(&mut c, &mut s, b"back"), b"back");
+            // We spoke since: the next request is answered again.
+            let mut wire = Vec::new();
+            c.seal(CT_HANDSHAKE, &[HS_KEY_UPDATE, 0, 0, 1, 1], &mut wire)
+                .unwrap();
+            assert!(c.tx.update());
+            let mut reply = Vec::new();
+            assert_eq!(
+                s.open(&mut wire, &mut reply).unwrap(),
+                Opened::KeyUpdated { respond: true }
+            );
+            assert_eq!(
+                c.open(&mut reply, &mut Vec::new()).unwrap(),
+                Opened::KeyUpdated { respond: false }
+            );
+            assert_eq!(deliver(&mut s, &mut c, b"again"), b"again");
+        }
     }
 
     #[test]

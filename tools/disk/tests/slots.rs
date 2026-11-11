@@ -238,6 +238,11 @@ fn stage_activate_confirm_and_roll_back() {
 
 /// minisign's legacy (`Ed`) format, signed with a throwaway key.
 fn minisign(key: &SigningKey, id: [u8; 8], msg: &[u8]) -> (String, String) {
+    minisign_with(key, id, msg, "timestamp:0\tfile:SHA256SUMS")
+}
+
+/// As [`minisign`], with the trusted comment `trusted`.
+fn minisign_with(key: &SigningKey, id: [u8; 8], msg: &[u8], trusted: &str) -> (String, String) {
     let mut pk = b"Ed".to_vec();
     pk.extend_from_slice(&id);
     pk.extend_from_slice(&key.verifying_key().to_bytes());
@@ -249,7 +254,6 @@ fn minisign(key: &SigningKey, id: [u8; 8], msg: &[u8]) -> (String, String) {
     let mut line = b"Ed".to_vec();
     line.extend_from_slice(&id);
     line.extend_from_slice(&sig);
-    let trusted = "timestamp:0\tfile:SHA256SUMS";
     let mut covered = sig.to_vec();
     covered.extend_from_slice(trusted.as_bytes());
     let global = key.sign(&covered).to_bytes();
@@ -367,6 +371,99 @@ fn a_release_image_is_staged_only_with_its_signature() {
         "{t}"
     );
     assert!(t.contains("slot B holds v0.6.1"), "{t}");
+}
+
+/// Security review of v0.6.0, SUPPLY-3: `slots stage --keyring` applies the
+/// key ring (as the builder page and `check-release --keyring` do). The former
+/// test key may sign only its old, pinned tags: an image it signs for a new
+/// tag is refused, while `--pubkey` with that key (no ring) still accepts it.
+/// The release key signs a new tag, named by the signed trusted comment.
+#[test]
+fn stage_with_the_key_ring_refuses_the_former_test_key_for_a_new_tag() {
+    let d = ab_disk(
+        "ring.img",
+        &esp(Some("v0.6.0"), 5, 17, &config_slot(false), 0),
+    );
+    let rel = gpt::raw_image(&esp(Some("v0.6.1"), 5, 17, &config_slot(false), 7)).unwrap();
+    let name = "urmqtt-template-v0.6.1-universal.img";
+    let ring_dir = tmp("ring");
+    std::fs::create_dir_all(&ring_dir).unwrap();
+    let put = |n: &str, b: &[u8]| {
+        let p = ring_dir.join(n);
+        std::fs::write(&p, b).unwrap();
+        p
+    };
+    let img = put(name, &rel);
+    let sums = format!("{}  {name}\n", sha256_hex(&rel));
+    let sums_p = put("SHA256SUMS", sums.as_bytes());
+    let release = SigningKey::from_bytes(&[0x31; 32]);
+    let test_key = SigningKey::from_bytes(&[0x32; 32]);
+    let comment = "urMQTT v0.6.1 release 0123456789abcdef";
+    let (release_pub, release_sig) = minisign_with(&release, [1; 8], sums.as_bytes(), comment);
+    let (test_pub, test_sig) = minisign_with(&test_key, [2; 8], sums.as_bytes(), comment);
+    let release_p = put("release.pub", release_pub.as_bytes());
+    let test_p = put("test.pub", test_pub.as_bytes());
+    let ring = put(
+        "release-keys.json",
+        br#"{"schema": 1, "keys": [
+  {"name": "release", "file": "release.pub", "valid_from": "v0.4.2", "valid_to": null, "former_test_key": false},
+  {"name": "test", "file": "test.pub", "valid_from": "v0.1.0", "valid_to": "v0.4.1", "former_test_key": true,
+   "pinned": {"v0.4.1": "3cca2f593cd402addbf975c4104f4cd6b2c00226f84d98874e430156866bb17b"}}
+]}"#,
+    );
+    let test_sig_p = put("SHA256SUMS.minisig.test", test_sig.as_bytes());
+    let release_sig_p = put("SHA256SUMS.minisig", release_sig.as_bytes());
+    let stage = |sig: &Path, keys: &[&str]| {
+        let mut v = vec![
+            "slots",
+            "stage",
+            s(&d),
+            "--image",
+            s(&img),
+            "--sums",
+            s(&sums_p),
+            "--sig",
+            s(sig),
+        ];
+        v.extend_from_slice(keys);
+        v.push("--write");
+        v.into_iter().map(str::to_owned).collect::<Vec<_>>()
+    };
+    fn refs(v: &[String]) -> Vec<&str> {
+        v.iter().map(String::as_str).collect()
+    }
+    // The former test key for v0.6.1, through the ring: refused.
+    let with_ring = stage(&test_sig_p, &["--keyring", s(&ring)]);
+    refused(
+        &refs(&with_ring),
+        "may sign v0.1.0 to v0.4.1 only, not v0.6.1",
+    );
+    // Both forms at once are refused.
+    let both = stage(
+        &release_sig_p,
+        &["--keyring", s(&ring), "--pubkey", s(&release_p)],
+    );
+    refused(&refs(&both), "not both");
+    // The release key, through the ring: staged, the tag from the signed comment.
+    let t = ok(&refs(&stage(&release_sig_p, &["--keyring", s(&ring)])));
+    assert!(
+        t.contains(
+            "release signature ok: SHA256SUMS of v0.6.1 signed by key 0101010101010101 (release)"
+        ),
+        "{t}"
+    );
+    assert!(t.contains("slot B holds v0.6.1"), "{t}");
+    // Without the ring the former test key is accepted (documented, warned).
+    let o = disk(&refs(&stage(
+        &test_sig_p,
+        &["--pubkey", s(&release_p), "--pubkey", s(&test_p)],
+    )));
+    let t = text(&o);
+    assert!(
+        t.contains("release signature ok: SHA256SUMS signed by key 0202020202020202"),
+        "{t}"
+    );
+    assert!(t.contains("no key ranges, no pins"), "{t}");
 }
 
 #[test]
@@ -638,4 +735,119 @@ fn an_in_place_update_keeps_the_slot_a_way_back() {
         "{t}"
     );
     assert!(status(&d).contains("v0.6.2 (store schema 5): confirmed"));
+}
+
+/// BOOT-3 (security review v0.6.0, ADR-368): `update-boot --in-place` on an A/B disk applied none
+/// of the rules of `slots stage` (an older release, a kernel whose store schema is older than the
+/// store, a configuration format the kernel cannot read, a kernel without a build note) and then
+/// resealed the slot as a confirmed way back. It applies them now.
+#[test]
+fn an_in_place_update_keeps_the_downgrade_rules() {
+    let d = ab_disk(
+        "in-place-rules.img",
+        &esp(Some("v0.6.0"), 5, 17, &config_slot(true), 0),
+    );
+    let try_esp = |name: &str, e: Vec<u8>| write(&format!("in-place-rules-{name}.esp"), &e);
+    let older = try_esp("v0.5.9", esp(Some("v0.5.9"), 4, 13, &config_slot(false), 9));
+    // slots stage refuses it, and so does update-boot --in-place, with the same words.
+    refused(
+        &[
+            "slots",
+            "stage",
+            s(&d),
+            "--esp",
+            s(&older),
+            "--unsigned",
+            "--write",
+        ],
+        "reads formats up to 13",
+    );
+    refused(
+        &[
+            "update-boot",
+            s(&d),
+            "--esp",
+            s(&older),
+            "--in-place",
+            "--write",
+        ],
+        "reads formats up to 13",
+    );
+    // An older store schema is never allowed.
+    let schema4 = try_esp(
+        "schema4",
+        esp(Some("v0.6.1"), 4, 17, &config_slot(false), 4),
+    );
+    refused(
+        &[
+            "update-boot",
+            s(&d),
+            "--esp",
+            s(&schema4),
+            "--in-place",
+            "--allow-downgrade",
+            "--write",
+        ],
+        "it would refuse the store",
+    );
+    // An older release needs --allow-downgrade.
+    let v059 = try_esp(
+        "v0.5.9b",
+        esp(Some("v0.5.9"), 5, 17, &config_slot(false), 5),
+    );
+    refused(
+        &[
+            "update-boot",
+            s(&d),
+            "--esp",
+            s(&v059),
+            "--in-place",
+            "--write",
+        ],
+        "is older than the running v0.6.0",
+    );
+    // A kernel without a build note is no way back on an A/B disk.
+    let bare = try_esp("bare", esp(None, 5, 17, &config_slot(false), 6));
+    refused(
+        &[
+            "update-boot",
+            s(&d),
+            "--esp",
+            s(&bare),
+            "--in-place",
+            "--write",
+        ],
+        "carry no build note",
+    );
+    // Nothing of that changed the disk.
+    assert!(status(&d).contains("v0.6.0 (store schema 5): confirmed"));
+    let t = ok(&[
+        "update-boot",
+        s(&d),
+        "--esp",
+        s(&v059),
+        "--in-place",
+        "--allow-downgrade",
+        "--write",
+    ]);
+    assert!(t.contains("downgrade from v0.6.0 to v0.5.9 allowed"), "{t}");
+    assert!(status(&d).contains("v0.5.9 (store schema 5): confirmed"));
+}
+
+/// The configuration tool reads the kernels' build note (ADR-367) the way
+/// the store's decoder does.
+#[test]
+fn the_config_tool_reads_the_build_note_like_the_store() {
+    let e = esp(Some("v0.6.0"), 5, 17, &config_slot(false), 0);
+    assert_eq!(urmqtt_config_tool::image::notes_cfg_format(&e), Some(17));
+    assert_eq!(slots::find_notes(&e)[0].cfg_format, 17);
+    let none = esp(None, 5, 17, &config_slot(false), 0);
+    assert_eq!(urmqtt_config_tool::image::notes_cfg_format(&none), None);
+    assert!(slots::find_notes(&none).is_empty());
+    // A broken note (reserved bytes set) is no note for either.
+    let mut bad = e.clone();
+    bad[2 * MIB + 27] = 1;
+    bad[3 * MIB + 27] = 1;
+    assert_eq!(urmqtt_config_tool::image::notes_cfg_format(&bad), None);
+    assert!(slots::find_notes(&bad).is_empty());
 }

@@ -1893,6 +1893,24 @@ impl TcpStack {
                 TimerKind::FinWait2 => self.close_with(c, CloseReason::Timeout, app),
                 TimerKind::Persist => {
                     if k.snd_wnd == 0 && k.tx_len() > 0 {
+                        // Once the application has closed, a peer that keeps
+                        // its window shut holds data nobody will read: the
+                        // probes count like retransmissions and the
+                        // connection is given up after `MAX_RETRIES` of them
+                        // (ADR-355). Before, the persist timer re-armed itself
+                        // for ever and a closed connection (a refused TLS
+                        // handshake with a zero-window final ACK) was never
+                        // freed. A probe the peer takes moves `snd_una` and
+                        // starts the count again; an open connection still
+                        // waits for its window as long as it takes.
+                        if k.has(FIN_QUEUED) {
+                            k.set_timeouts(k.timeouts() + 1);
+                            if k.timeouts() > MAX_RETRIES {
+                                self.stats.timeouts += 1;
+                                self.close_with(c, CloseReason::Timeout, app);
+                                continue;
+                            }
+                        }
                         // Window probe: one byte beyond the window. Every
                         // probe is that same first unacknowledged byte: a
                         // probe the peer did not take is sent again, so a

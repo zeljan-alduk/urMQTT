@@ -162,6 +162,10 @@ pub const MQTT_MAX_PACKET_SIZE: u64 = 268_435_455;
 pub const MIN_PACKET_SIZE: u64 = 64;
 /// Longest topic (a `u16` length prefix).
 pub const MQTT_MAX_TOPIC_LEN: u64 = 65_535;
+/// Most levels in a topic (ADR-346): the topic-tree walks recurse once per
+/// level on a data core's 128 KiB stack, so the depth stays far below what
+/// overflows it (some 800 levels).
+pub const MAX_TOPIC_LEVELS: u64 = 128;
 /// `network.mtu` (NOW-19, ADR-264): 0 (the default) takes the MTU from DHCP
 /// option 26, else 1500; otherwise a value in `MIN_MTU..=MAX_MTU`.
 pub const MIN_MTU: u64 = 576;
@@ -572,8 +576,8 @@ pub static FIELDS: &[Field] = &[
     f(
         t::LIM_TOPIC_LEVELS,
         "limits.max_topic_levels",
-        uint(4, 1, U32, 16),
-        "Most levels in a topic.",
+        uint(4, 1, MAX_TOPIC_LEVELS, 16),
+        "Most levels in a topic (at most 128).",
     ),
     f(
         t::LIM_SUBSCRIPTIONS,
@@ -584,7 +588,8 @@ pub static FIELDS: &[Field] = &[
     f(
         t::LIM_INFLIGHT,
         "limits.max_inflight_qos1",
-        uint(4, 1, U32, 16),
+        // ADR-377: at most the 65 535 packet ids.
+        uint(4, 1, 65_535, 16),
         "QoS 1 messages in flight per session.",
     ),
     f(

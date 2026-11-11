@@ -328,6 +328,18 @@ pub const CONTROL_TOPIC: &str = "$urmqtt/control";
 /// (counted), so a flooding control service costs bounded work.
 const MAX_CONTROL_BACKLOG: usize = 64;
 
+/// How long a connection may stay without a session: from [`Broker::open`]
+/// to its CONNECT (ADR-362). MQTT 3.1.4: the server should close a
+/// connection whose CONNECT does not come within a reasonable time. The
+/// transport's own handshake deadline stops once the connection is handed
+/// to the broker; without this one a connection that never sent CONNECT
+/// was held forever, and its slot with it. Input before the CONNECT does not
+/// move it: a client that drips a byte at a time gets no longer. A minute,
+/// not the handshake's 10 s: a WebSocket page may upgrade before its MQTT
+/// library connects, and the deadline is about holding a slot for ever, not
+/// about authorisation (`disconnect_unless` covers these connections).
+pub const CONNECT_TIMEOUT_MS: u64 = 60_000;
+
 /// What an operator asked for on a `$SYS/` request topic (O1, O2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SysKind {
@@ -825,6 +837,12 @@ impl Session {
 /// (mosquitto's and paho's default windows), ADR-271.
 pub const MIN_QOS2_IDS: usize = 64;
 
+/// The largest in-flight window (`max_inflight`, ADR-377): the 65 535 packet
+/// ids. A session starts a flight only below its window, so fewer than this
+/// are in flight then and [`Broker::alloc_pid`] always finds a free id. A
+/// larger configured value is clamped to it (the schema refuses it).
+pub const MAX_INFLIGHT: usize = 65_535;
+
 /// One subscription: an interned filter. A device-scoped filter
 /// (`<scope>/<own client id>/<rest>`, PROMPT §7.3) is stored as `rest`,
 /// interned once for all devices in `Broker::scoped`, so devices cost no
@@ -1063,7 +1081,10 @@ fn within_limits(t: &str, limits: &Limits, valid: fn(&str) -> bool) -> bool {
 const INBUF_SLACK: usize = 5;
 
 impl Broker {
-    pub fn new(cfg: Config) -> Self {
+    pub fn new(mut cfg: Config) -> Self {
+        // ADR-377: a window beyond the packet ids would make `alloc_pid`
+        // spin; the configuration schema refuses it too.
+        cfg.max_inflight = cfg.max_inflight.min(MAX_INFLIGHT);
         Self {
             cfg,
             login_class: None,
@@ -1170,12 +1191,32 @@ impl Broker {
         keep: impl Fn(&str, Role) -> bool,
         why: CloseReason,
     ) -> usize {
-        let doomed: Vec<ConnId> = self
+        let mut doomed: Vec<ConnId> = self
             .sessions
             .iter()
             .filter(|(_, s)| !keep(s.acl_id(), s.role))
             .filter_map(|(_, s)| s.conn())
             .collect();
+        // A connection with an identity and no session yet (authenticated,
+        // its CONNECT still to come) is judged by the role that CONNECT
+        // would give it (ADR-362): otherwise it is not closed, and the
+        // CONNECT that follows is accepted for an identity that may no longer
+        // connect.
+        doomed.extend(
+            self.conns
+                .iter()
+                .filter(|(_, k)| k.session.is_none() && k.close.is_none())
+                .filter_map(|(c, k)| {
+                    let e = k.extra.as_ref()?;
+                    let id = e.identity.as_deref()?;
+                    let role = match k.login() {
+                        Some(r) => r,
+                        None if e.bootstrap => Role::Bootstrap,
+                        None => self.cfg.acl.role(id),
+                    };
+                    (!keep(id, role)).then_some(c)
+                }),
+        );
         for &c in &doomed {
             self.mark_close(c, why);
         }
@@ -1657,12 +1698,17 @@ impl Broker {
             }
         } else {
             match scoped_part(self.scope, &s.client_id, filter) {
-                Some(rel) => Sub {
-                    node: self.scoped.intern_filter(rel),
-                    opts,
-                    scoped: true,
-                    shared: false,
-                },
+                Some(rel) => {
+                    // Shared by every device: counted, pruned at zero (ADR-376).
+                    let node = self.scoped.intern_filter(rel);
+                    self.scoped.hold(node);
+                    Sub {
+                        node,
+                        opts,
+                        scoped: true,
+                        shared: false,
+                    }
+                }
                 None => {
                     let node = self.topics.intern_filter(filter);
                     self.topics.subscribe(node, sid, opts);
@@ -1696,7 +1742,9 @@ impl Broker {
             if sub.shared {
                 self.leave(sid, role, sub.node);
                 self.share_paths.unsubscribe(sub.node, sid);
-            } else if !sub.scoped {
+            } else if sub.scoped {
+                self.scoped.release(sub.node);
+            } else {
                 self.topics.unsubscribe(sub.node, sid);
             }
         }
@@ -1981,7 +2029,11 @@ impl Broker {
         if conn.close.is_some() {
             return;
         }
-        conn.last_rx_ms = now_ms;
+        // Before the CONNECT, `last_rx_ms` stays the time of `open`: the
+        // CONNECT deadline (ADR-362). The CONNECT itself sets it.
+        if conn.session.is_some() {
+            conn.last_rx_ms = now_ms;
+        }
         conn.inbuf.extend_from_slice(data);
         if conn.flow != 0 {
             self.held_input(c, now_ms);
@@ -2016,6 +2068,12 @@ impl Broker {
             }
             if conn.flow & flow::WAIT_SUBACK != 0 {
                 break flow::Stop::Waiting;
+            }
+            // A client that sends without reading what it is answered gets
+            // its input held, not an output buffer without bound (ADR-375).
+            if conn.outbuf.len() >= self.out_hold_limit() {
+                self.hold_for_output(c);
+                break flow::Stop::OutFull;
             }
             if off >= budget {
                 break flow::Stop::Budget;
@@ -2122,6 +2180,8 @@ impl Broker {
         if let Some(conn) = self.conn(c) {
             conn.outbuf.consume(n);
         }
+        // Input held for this output (ADR-375): drained once it is down.
+        self.output_freed(c);
         // Space freed: move queued QoS 1 messages into flight.
         if let Some(s) = self.conn(c).and_then(|k| k.session) {
             self.pump(s);
@@ -2166,7 +2226,17 @@ impl Broker {
         let expiry = attached
             .and_then(|sid| self.sessions.get(sid))
             .map_or(0, |s| s.expiry_s);
-        if let Some(w) = conn.extra.and_then(|e| e.will).filter(|_| !self.stopping) {
+        // A connection closed because its identity lost the right to be
+        // here (revoked, disallowed, its account removed or changed:
+        // CloseReason::Disallowed) has its Will dropped (ADR-364): the Will
+        // was authorised at CONNECT, for rights the identity no longer has,
+        // and a delayed one would go out after the revocation.
+        let withdrawn = conn.close == Some(CloseReason::Disallowed);
+        if let Some(w) = conn
+            .extra
+            .and_then(|e| e.will)
+            .filter(|_| !self.stopping && !withdrawn)
+        {
             match attached {
                 Some(sid) if expiry > 0 && w.delay_s > 0 => {
                     let delay = w.delay_s.min(expiry);
@@ -2291,8 +2361,24 @@ impl Broker {
         for (i, k) in self.conns.iter_mut() {
             // A connection whose input is held for back-pressure is alive:
             // its PINGREQ waits in the held bytes (ADR-269).
+            // No CONNECT within CONNECT_TIMEOUT_MS of `open` (ADR-362): no
+            // session, so nobody to tell; closed.
             if k.close.is_none()
-                && k.flow == 0
+                && k.session.is_none()
+                && now_ms.saturating_sub(k.last_rx_ms) > CONNECT_TIMEOUT_MS
+            {
+                k.close = Some(CloseReason::KeepAliveTimeout);
+                if !k.ready {
+                    k.ready = true;
+                    self.ready.push(i);
+                }
+                continue;
+            }
+
+            // its PINGREQ waits in the held bytes (ADR-269). One held for
+            // its own unread output is not (ADR-375): it does not read.
+            if k.close.is_none()
+                && k.flow & !flow::OUT_FULL == 0
                 && k.keepalive_s > 0
                 && now_ms.saturating_sub(k.last_rx_ms) > u64::from(k.keepalive_s) * 1500
             {
@@ -2804,6 +2890,7 @@ impl Broker {
         if let Some(k) = self.conn(c) {
             k.session = Some(sid);
             k.keepalive_s = keep_alive;
+            k.last_rx_ms = now_ms;
             if will.is_some() {
                 k.extra_mut().will = will;
             }
@@ -2914,8 +3001,12 @@ impl Broker {
         self.will_at.cancel(sid);
         let will = self.wills.remove(&sid);
         self.subs_total = self.subs_total.saturating_sub(s.subs.len());
-        for x in s.subs.as_slice().iter().filter(|x| !x.scoped && !x.shared) {
-            self.topics.unsubscribe(x.node, sid);
+        for x in s.subs.as_slice().iter().filter(|x| !x.shared) {
+            if x.scoped {
+                self.scoped.release(x.node);
+            } else {
+                self.topics.unsubscribe(x.node, sid);
+            }
         }
         if !self.sub_ids.is_empty() {
             let keys: Vec<(SessionId, u8, NodeId)> = self
@@ -3262,7 +3353,9 @@ impl Broker {
         to
     }
 
-    /// The next packet id not in flight (the window is far below 65 535).
+    /// The next packet id not in flight. Called only below the window, so
+    /// fewer than [`MAX_INFLIGHT`] (65 535) ids are in flight and one is
+    /// free: the loop ends within 65 535 steps (ADR-377).
     fn alloc_pid(s: &mut Session) -> u16 {
         loop {
             let id = s.next_pid;

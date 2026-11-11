@@ -790,14 +790,11 @@ fn setup_msix_queues<C: ConfigSpace>(
     mut more: impl FnMut(u16) -> Result<(u32, u64, u32), Why>,
 ) -> Result<(u32, NetQueueVectors), Why> {
     let info = pci::msix(cfg, bdf).ok_or(Why::NoMsix)?;
-    let Some(Bar::Memory { base, .. }) = pci::bar(cfg, bdf, info.table_bar) else {
-        return Err(Why::TableUnmapped);
-    };
-    let va = map(
-        base + u64::from(info.table_offset),
-        u64::from(info.table_size) * 16,
-    )
-    .map_err(|_| Why::TableUnmapped)?;
+    // The table must lie inside its BAR (ADR-345), as `region` requires of
+    // the virtio structures: offset and size are the device's to choose.
+    // Sizing the BAR turns decoding off briefly, so it precedes the enable.
+    let (pa, len) = pci::msix_table(cfg, bdf, &info).ok_or(Why::TableUnmapped)?;
+    let va = map(pa, len).map_err(|_| Why::TableUnmapped)?;
     let table = MsixTable {
         va,
         entries: info.table_size,
