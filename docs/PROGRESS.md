@@ -9,6 +9,20 @@ Nine lenses, proof and three skeptics per finding; 31 findings fixed on `main` (
 tests, 8 low findings open with details withheld until fixed. Not an independent audit. Report:
 [audit/security-review-v0.6.0.md](audit/security-review-v0.6.0.md). Fix notes per lens: `docs/v0.6.1-notes/`.
 
+## Release v0.6.0 published and verified (2026-11-11)
+
+Tag `v0.6.0` on `e62584e` (CI green), pre-release, signed by the Release workflow (build without a secret, sign in the
+protected environment `release`, publish). Checked: `minisign -Vm SHA256SUMS` (trusted comment `urMQTT v0.6.0 release
+e62584e5...`), `shasum -c`, `cmp` iso and template, `gh attestation verify` (elf and iso provenance, iso SBOM),
+`urmqtt-config check-release` with the key ring, `verify` of the image (format 23). Templates: format 13 packs on v0.6.0
+and v0.5.0 with the same fingerprint; formats 14 and 23 pack on v0.6.0 and are refused by v0.5.0 with "use a newer
+release". Builder page redeployed before the tag (format 23, release and test keys); after the mirror run
+(`releases.json` lists v0.6.0, format 23, release key) it offers v0.6.0, verifies it and builds an ISO in the browser.
+The GitHub environment `release` was created (required reviewer, tags `v*`); `MINISIGN_SECRET_KEY` is still a repository
+secret (moving it into the environment is the owner's step). The internal security review (docs/audit/security-review-
+v0.6.0.md) is merged and the blog post is published in 15 languages. Not done: the first VPS and hardware runs, the
+x86_64 smoke in CI, an independent audit.
+
 ## Release candidate v0.6.0 (2026-11-09)
 
 Everything for the release except publishing: nothing was tagged, signed or uploaded, and no server, VPS or cloud
