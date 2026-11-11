@@ -11,6 +11,22 @@ installed disks** (ADR-320 to ADR-324) and **a disk key that is not in the image
 "Upgrading from v0.5.0" before you update: the database migrates one way, and a source address is now limited to 1024
 connections.**
 
+### Security review of this release
+
+Before the tag the release went through an internal, AI-assisted security review (nine lenses, proof per finding, three
+independent skeptics per finding; **not** an independent audit, see the report for its limits):
+[docs/audit/security-review-v0.6.0.md](https://github.com/zeljan-alduk/urMQTT/blob/main/docs/audit/security-review-v0.6.0.md).
+It reported 48 candidates; **31 findings are fixed in this release, with a regression test each, three of them of high
+severity**: a leak of captured TLS handshake secrets that, after 4096 abandoned handshakes, made later overlapping
+handshakes fail until a reboot (ADR-340); a client certificate with more than one common name that the broker and the
+signing script read differently, so that it could carry another identity (ADR-360); and a TLS handshake refused under a
+zero window that left a connection never freed, until the heap was full (ADR-355). The code behind them is older than this
+release, so **assume earlier releases are affected and update**. The medium and low findings are listed in the report;
+the 8 findings that are still open are all of low severity and their details are withheld until they are fixed
+(docs/VULNERABILITY-HANDLING.md). The release pipeline changed as a result: the build job holds no secret, a separate
+job in the protected environment `release` signs, and a signed older release can no longer be offered under a newer tag
+(ADR-380, ADR-381).
+
 Signed with the release key `721316B961DCB94B` (`minisign.pub` at the tag), as v0.4.2 and v0.5.0 were. The former test
 key `9229E05252D01F8E` signed v0.1.0 to v0.4.1 only; a signature by it on any later tag is a forgery (SECURITY.md).
 
