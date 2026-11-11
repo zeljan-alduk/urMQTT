@@ -45,21 +45,24 @@ update tooling, storage, parsers, release pipeline and vendored code. See sectio
 
 ## 3. Results
 
-Counts are the candidates each lens reported ("found"), those that survived the skeptics ("confirmed") and those
-that were fixed. A finding found while fixing another one is included in "found" for the lens.
+Counts are the candidates each lens reported ("found") and those that were fixed. A finding found while fixing another one is included in "found" for the lens.
 
-| Lens | Found | Confirmed | Refuted | Fixed | Open |
-|---|---|---|---|---|---|
-| supply | 5 | 4 | 0 recorded | 4 | 0 |
-| crypto | 5 | 3 | 0 recorded | 2 | 1 |
-| authz | 11 | 9 | 0 recorded | 6 | 3 |
-| broker | 6 | 5 | 0 recorded | 3 | 2 |
-| boot | 5 | 5 | 0 recorded | 5 | 0 |
-| unsafe | 4 | 3 | 0 recorded | 3 | see below |
-| storage | 8 | 6 | 0 recorded | 5 | 1 |
-| netdos | 2 | 2 | 0 recorded | 2 | 0 |
-| parsers | 2 | 1 | 0 recorded | 1 | 0 |
-| **Total** | **48** | **38** | **0 recorded** | **31** | **8** |
+| Lens | Found | Fixed |
+|---|---|---|
+| supply | 5 | 4 |
+| crypto | 5 | 2 |
+| authz | 11 | 6 |
+| broker | 6 | 3 |
+| boot | 5 | 5 |
+| unsafe | 4 | 3 |
+| storage | 8 | 5 |
+| netdos | 2 | 2 |
+| parsers | 2 | 1 |
+| **Total** | **48** | **31** |
+
+Of the 48 candidates, 38 were confirmed by the skeptics, 31 of them are fixed and 7 are not (plus one more finding
+made while fixing another, see "Open findings"). The per-lens split of confirmed and open findings is not published:
+it would show where an unfixed issue sits.
 
 Notes on the table.
 
@@ -67,9 +70,8 @@ Notes on the table.
   confirmed (10 candidates) is made of information-level observations (hardening, documentation mismatches, a
   fuzzing gap, a debug-build-only assertion, a reproducibility note) that were recorded but not rated as
   vulnerabilities. See section 5.
-- "Open" is the number of findings not fixed on `main` at the time of writing. It includes one extra finding made
-  while fixing another one, which is in the `unsafe` row and is not part of "found". Of the 8, 7 are confirmed
-  findings (38 confirmed = 31 fixed + 7 open); the eighth is that residual finding.
+- 8 findings are not fixed on `main` at the time of writing (7 confirmed findings, and one more made while fixing
+  another). They are counted in total only, not per lens, see "Open findings" below.
 - Two findings (SUPPLY-2 and BOOT-1) are the same flaw reported by two lenses; the fix was unified, and both are
   counted.
 - Fixed by severity: 3 high, 11 medium, 17 low. Some low findings were closed by documentation or a warning
@@ -83,7 +85,8 @@ this repository. Their impact is limited by the severity above.
 
 ## 4. Fixed findings
 
-Severity is the review's rating. ADR numbers are in [DECISIONS.md](../DECISIONS.md); release notes per lens are in
+Severity is the review's rating. Finding numbers are not contiguous: not every candidate was numbered into the tables
+below. ADR numbers are in [DECISIONS.md](../DECISIONS.md); release notes per lens are in
 `docs/v0.6.1-notes/`. Changes to the configuration format number or the store schema: none.
 
 ### 4.1 supply (release pipeline and signing)
@@ -112,8 +115,6 @@ Severity is the review's rating. ADR numbers are in [DECISIONS.md](../DECISIONS.
 | AUTHZ-2 | medium | `crates/plain`, kernel `plain.rs`/`websocket.rs` | A successful login cleared the address's failure count, and connections opened before a lock-out were still judged, so an account holder could guess other passwords without being locked out | A login no longer touches the count; a CONNECT from a locked-out address is refused without hashing and without a new failure | `sources::tests::logins_between_failures_do_not_save_an_address_from_the_lockout`; smoke plaintext lock-out scenario | ADR-363 |
 | AUTHZ-4 | low | `crates/broker` | The Will of a connection closed because its identity was revoked, disallowed or its account narrowed or removed was still published | That Will is dropped, delayed or not (the cases the kernel reports as a disallow close) | `v5_tests::a_revoked_devices_delayed_will_is_dropped`, `::a_narrowed_accounts_will_is_dropped_with_its_login` | ADR-364 |
 | AUTHZ-3 | low | `crates/plain/src/auth.rs` | User enumeration by time when account hashes have different iteration counts | Every path costs the dearest count (the difference is spent on a throwaway derivation) | `auth::tests::a_cheaper_account_takes_as_long_as_an_unknown_user` | ADR-364 |
-
-Related residual behaviour of Will handling and of the authz lens is counted in the open totals of section 3.
 
 ### 4.4 broker
 
