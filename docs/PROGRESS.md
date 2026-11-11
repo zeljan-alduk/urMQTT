@@ -3,6 +3,12 @@
 One entry per milestone: what was done, what was measured and the known gaps. Newest entries first down to H7; the entries from M0 to S6 follow in the order they were written.
 Milestones are defined in [PROMPT.md §9](../PROMPT.md#9-milestones-and-acceptance-criteria).
 
+## Internal security review of v0.6.0 (2026-11-11)
+
+Nine lenses, proof and three skeptics per finding; 31 findings fixed on `main` (merge `de98c6f`) with regression
+tests, 8 low findings open with details withheld until fixed. Not an independent audit. Report:
+[audit/security-review-v0.6.0.md](audit/security-review-v0.6.0.md). Fix notes per lens: `docs/v0.6.1-notes/`.
+
 ## Release candidate v0.6.0 (2026-11-09)
 
 Everything for the release except publishing: nothing was tagged, signed or uploaded, and no server, VPS or cloud
