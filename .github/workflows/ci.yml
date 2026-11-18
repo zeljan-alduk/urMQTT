@@ -86,8 +86,8 @@ jobs:
         run: |
           scripts/check-arch-leaks.sh --self-test
           scripts/check-arch-leaks.sh
-      - uses: crate-ci/typos@4c8b7f51ca60df14e3c5ca82770dfbbe6c3dae85 # v1.52.0
-      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+      - uses: crate-ci/typos@276087d9a4f06398b3e04825487805e2d7375888 # v1.52.2
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: shellcheck
       - name: actionlint
@@ -394,7 +394,7 @@ jobs:
           cache-key: miri-${{ matrix.name }}
       - name: Install Miri
         run: rustup component add miri
-      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: cargo-nextest
       - name: Miri result key
@@ -509,7 +509,7 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           cache-key: supply-chain
-      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: cargo-vet
       # Every dependency is audited, covered by an imported audit or listed as
@@ -572,7 +572,7 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           cache-key: fuzz
-      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: cargo-fuzz
       # The config crate's build script embeds the development certificates.
